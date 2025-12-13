@@ -1,0 +1,9 @@
+flask
+flask-cors
+requests
+aiohttp
+aiohttp-cors
+aiortc
+opencv-python-headless
+av
+numpy
