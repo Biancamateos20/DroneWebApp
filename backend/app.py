@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import requests  # Para mandar datos a la VM
+import Gestos.imagen
 
 from flask_cors import CORS
 app = Flask(__name__)
@@ -30,7 +31,13 @@ def recibir_ubicacion():
 
     return jsonify({"status": "ok"})
 
+@app.route("/offer", methods=["POST"])
+def webRTC():
+    return jsonify({"error": "El WebRTC está en el servicio 'webrtc' (puerto 8090)"}), 400
+
+ 
+
 
 if __name__ == "__main__":
     print("Servidor Flask arrancando en http://127.0.0.1:5001 ...")
-    app.run(host="192.168.1.133", port=5001, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True)
