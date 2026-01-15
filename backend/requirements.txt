@@ -7,3 +7,4 @@ aiortc
 opencv-python-headless
 av
 numpy
+mediapipe
