@@ -70,6 +70,54 @@ def registrar_jugador():
 
 
 # ===============================
+# UBICACIÓN EN DIRECTO (LIVE)
+# ===============================
+@app.route("/ubicacion-live", methods=["POST"])
+def ubicacion_live():
+    data = request.get_json() or {}
+
+    lat = data.get("lat")
+    lon = data.get("lon")
+    alias = data.get("alias")
+    precision = data.get("precision")
+    ts = data.get("ts")
+
+    if lat is None or lon is None or alias is None:
+        return jsonify({"error": "Datos incompletos"}), 400
+
+    # Si no está registrado, devolvemos error para que el frontend haga fallback a /jugador
+    if alias not in colores_ocupados:
+        return jsonify({"error": "Jugador no registrado"}), 400
+
+    # Actualiza posición del jugador en la lista
+    found = False
+    for j in jugadores:
+        if j.get("alias") == alias:
+            j["lat"] = lat
+            j["lon"] = lon
+            j["precision"] = precision
+            j["ts"] = ts
+            found = True
+            break
+
+    if not found:
+        # Inconsistencia set/list
+        jugadores.append({"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts})
+
+    # Reenviar a la VM si tiene endpoint equivalente (opcional)
+    try:
+        requests.post(
+            f"{VM_BASE_URL}/ubicacion-live",
+            json={"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts},
+            timeout=2
+        )
+    except Exception as e:
+        print("⚠️ Error enviando ubicación live a la VM:", e)
+
+    return jsonify({"status": "ok"}), 200
+
+
+# ===============================
 # COLORES OCUPADOS
 # ===============================
 @app.route("/colores", methods=["GET"])
@@ -82,7 +130,6 @@ def colores():
 # ===============================
 @app.route("/jugadores", methods=["GET"])
 def get_jugadores():
-    # Devuelve lista de jugadores registrados: lat/lon/alias
     return jsonify(jugadores), 200
 
 
