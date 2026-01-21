@@ -7,7 +7,6 @@ const corsHeaders = {
 export async function onRequest(context) {
   const { request } = context;
 
-  // Preflight CORS
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders });
   }
@@ -17,14 +16,14 @@ export async function onRequest(context) {
   }
 
   const data = await request.json().catch(() => null);
-  if (!data || !data.alias) {
-    return new Response(JSON.stringify({ error: "Falta alias" }), {
+  if (!data) {
+    return new Response(JSON.stringify({ error: "JSON inválido" }), {
       status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 
-  return new Response(JSON.stringify({ ok: true, alias: data.alias }), {
+  return new Response(JSON.stringify({ ok: true, received: data }), {
     status: 200,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
