@@ -4,10 +4,15 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+function getStore() {
+  // Memoria (vale para pruebas)
+  if (!globalThis.__players) globalThis.__players = new Map();
+  return globalThis.__players;
+}
+
 export async function onRequest(context) {
   const { request } = context;
 
-  // Preflight CORS
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders });
   }
@@ -24,7 +29,22 @@ export async function onRequest(context) {
     });
   }
 
-  return new Response(JSON.stringify({ ok: true, alias: data.alias }), {
+  const store = getStore();
+  const prev = store.get(data.alias) || { alias: data.alias };
+
+  const jugador = {
+    ...prev,
+    alias: data.alias,
+    lat: data.lat ?? prev.lat ?? null,
+    lon: data.lon ?? prev.lon ?? null,
+    precision: data.precision ?? prev.precision ?? null,
+    ts: data.ts ?? prev.ts ?? null,
+    updatedAt: Date.now(),
+  };
+
+  store.set(data.alias, jugador);
+
+  return new Response(JSON.stringify({ ok: true, jugador }), {
     status: 200,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
