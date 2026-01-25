@@ -32,9 +32,13 @@ export default {
       map: null,
       error: null,
       loading: false,
-      markers: {},
+      markers: {}, // { [alias]: L.Marker }
       polling: null,
-      mapReady: false
+      mapReady: false,
+
+      // capas base
+      layerEsri: null,
+      layerPnoaProvWms: null
     }
   },
 
@@ -44,6 +48,8 @@ export default {
 
   beforeUnmount() {
     if (this.polling) clearInterval(this.polling)
+    this.polling = null
+
     if (this.map) {
       this.map.remove()
       this.map = null
@@ -59,7 +65,6 @@ export default {
           <circle cx="12" cy="10" r="2.7" fill="white" opacity="0.9"/>
         </svg>
       `
-
       return L.divIcon({
         className: 'player-pin',
         html: svg,
@@ -70,6 +75,7 @@ export default {
     },
 
     initMap() {
+      // Evita: "Map container is already initialized"
       const container = L.DomUtil.get('map')
       if (container) container._leaflet_id = null
 
@@ -83,12 +89,54 @@ export default {
           const lat = pos.coords.latitude
           const lon = pos.coords.longitude
 
-          this.map = L.map('map').setView([lat, lon], 18.5)
+          // Limita maxZoom para evitar "zoom falso" (se ve borroso por reescalado)
+          this.map = L.map('map', { maxZoom: 19 }).setView([lat, lon], 18.5)
 
-          L.tileLayer(
-            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            { attribution: 'Tiles © Esri' }
-          ).addTo(this.map)
+          // ========= Base 1: Esri World Imagery (rápida y nítida) =========
+          this.layerEsri = L.tileLayer(
+            'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            {
+              maxZoom: 19,
+              attribution: 'Tiles © Esri'
+            }
+          )
+
+          // ========= Base 2: PNOA PROVISIONALES (WMS) — más reciente si hay cobertura =========
+          // Mejora nitidez:
+          // - tileSize: 512 → pide más píxeles por tile (mejor definición)
+          // - detectRetina: true → en pantallas retina pide densidad adecuada
+          this.layerPnoaProvWms = L.tileLayer.wms(
+            'https://wms-pnoa.idee.es/pnoa-provisionales',
+            {
+              layers: 'OrtoimagenRapida',
+              format: 'image/jpeg', // prueba 'image/png' si quieres menos artefactos (más pesado)
+              transparent: false,
+
+              // CLAVES PARA MEJORAR CALIDAD
+              tileSize: 512,
+              detectRetina: true,
+
+              // Evita sobre-zoom
+              maxZoom: 19,
+
+              attribution: '© IGN PNOA (Provisional)'
+            }
+          )
+
+          // Por defecto: PNOA Provisional (la más actual en tu caso)
+          this.layerPnoaProvWms.addTo(this.map)
+
+          // Selector de capas
+          L.control
+            .layers(
+              {
+                'IGN PNOA Provisional (OrtoimagenRapida)': this.layerPnoaProvWms,
+                'Esri World Imagery': this.layerEsri
+              },
+              null,
+              { position: 'topright' }
+            )
+            .addTo(this.map)
 
           this.mapReady = true
           this.cargarJugadores()
@@ -97,11 +145,7 @@ export default {
         () => {
           this.error = 'No se pudo obtener la ubicación'
         },
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0
-        }
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       )
     },
 
@@ -119,17 +163,32 @@ export default {
         const res = await fetch('/api/jugadores')
         if (!res.ok) return
         const jugadores = await res.json()
+        if (!Array.isArray(jugadores)) return
+
+        // Limpia markers de jugadores que ya no estén
+        const vivos = new Set(
+          jugadores.map((j) => j?.alias).filter((a) => typeof a === 'string' && a.length > 0)
+        )
+        Object.keys(this.markers).forEach((alias) => {
+          if (!vivos.has(alias)) {
+            this.markers[alias].remove()
+            delete this.markers[alias]
+          }
+        })
 
         jugadores.forEach((j) => {
           if (!j || j.lat == null || j.lon == null || !j.alias) return
 
-          const pos = [j.lat, j.lon]
+          const pos = [Number(j.lat), Number(j.lon)]
+          if (Number.isNaN(pos[0]) || Number.isNaN(pos[1])) return
 
           if (this.markers[j.alias]) {
             this.markers[j.alias].setLatLng(pos)
             return
           }
 
+          // Mantengo tu lógica: alias actúa como color.
+          // Si alias es un nombre, cambia a: const icon = this.createPinIcon(j.color)
           const icon = this.createPinIcon(j.alias)
 
           const marker = L.marker(pos, { icon })
@@ -146,11 +205,8 @@ export default {
     async iniciarJuego() {
       this.error = null
       this.loading = true
-
       try {
-        const res = await fetch('/api/iniciar-juego', {
-          method: 'POST'
-        })
+        const res = await fetch('/api/iniciar-juego', { method: 'POST' })
         if (!res.ok) {
           const data = await res.json().catch(() => ({}))
           throw new Error(data.error || 'Error al iniciar el juego')
@@ -261,5 +317,10 @@ export default {
 :deep(.player-pin) {
   background: transparent;
   border: none;
+}
+
+/* Opcional: mejora perceptiva en algunos navegadores */
+:deep(.leaflet-tile) {
+  image-rendering: -webkit-optimize-contrast;
 }
 </style>
