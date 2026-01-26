@@ -214,63 +214,73 @@ export default {
       this.lastSentCoords = null
     },
 
-    async onGeoSuccess(pos) {
-      if (!this.userAlias) return
+async onGeoSuccess(pos) {
+  if (!this.userAlias) return
 
-      const { latitude, longitude, accuracy } = pos.coords
-      const ts = pos.timestamp || Date.now()
+  const { latitude, longitude, accuracy } = pos.coords
+  const ts = pos.timestamp || Date.now()
 
-      // Throttle y movimiento mínimo (tu lógica)
-      const THROTTLE_MS = 250
-      const MIN_MOVE_M = 0.8
-      const now = Date.now()
+  const now = Date.now()
 
-      // PERO: el primer envío debe entrar sí o sí
-      if (this.lastSentAt && now - this.lastSentAt < THROTTLE_MS) return
+  // Ajustes
+  const THROTTLE_MS = 250          // no más de ~4 envíos/seg
+  const FORCE_EVERY_MS = 1000      // aunque no te muevas, envía al menos 1 vez/seg
+  const MIN_MOVE_M = 0.8          // si no hay "force", exige mínimo movimiento
 
-      if (this.lastSentCoords) {
-        const moved = this.haversineMeters(
-          this.lastSentCoords.lat,
-          this.lastSentCoords.lon,
-          latitude,
-          longitude
-        )
-        const improvedAccuracy = accuracy < (this.lastSentCoords.accuracy ?? 1e9)
-        if (moved < MIN_MOVE_M && !improvedAccuracy) return
-      }
+  // Throttle duro
+  if (this.lastSentAt && now - this.lastSentAt < THROTTLE_MS) return
 
-      this.lastSentAt = now
-      this.lastSentCoords = { lat: latitude, lon: longitude, accuracy }
+  // Envío forzado cada X ms (para que el admin vea updates constantes)
+  const force = !this.lastSentAt || (now - this.lastSentAt >= FORCE_EVERY_MS)
 
-      try {
-        const r = await fetch('/api/ubicacion-live', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            alias: this.userAlias,
-            lat: latitude,
-            lon: longitude,
-            precision: accuracy,
-            ts
-          })
+  // Si no es "force", aplicamos filtro de movimiento/precisión
+  if (!force && this.lastSentCoords) {
+    const moved = this.haversineMeters(
+      this.lastSentCoords.lat,
+      this.lastSentCoords.lon,
+      latitude,
+      longitude
+    )
+
+    const improvedAccuracy = accuracy < (this.lastSentCoords.accuracy ?? 1e9)
+
+    if (moved < MIN_MOVE_M && !improvedAccuracy) return
+  }
+
+  // Guardamos "último envío" (ojo: aquí, no antes)
+  this.lastSentAt = now
+  this.lastSentCoords = { lat: latitude, lon: longitude, accuracy }
+
+  try {
+    const r = await fetch('/api/ubicacion-live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        alias: this.userAlias,     // en tu sistema alias == color
+        lat: latitude,
+        lon: longitude,
+        precision: accuracy,
+        ts
+      })
+    })
+
+    // Fallback: si no estaba registrado aún, lo registramos
+    if (!r.ok) {
+      await fetch('/api/jugador', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alias: this.userAlias,
+          lat: latitude,
+          lon: longitude
         })
+      })
+    }
+  } catch (e) {
+    console.warn('Error enviando ubicación:', e)
+  }
+},
 
-        // fallback si no estaba registrado
-        if (!r.ok) {
-          await fetch('/api/jugador', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              alias: this.userAlias,
-              lat: latitude,
-              lon: longitude
-            })
-          })
-        }
-      } catch (e) {
-        console.warn('Error enviando ubicación:', e)
-      }
-    },
 
     onGeoError(err) {
       console.warn('Error geolocalización:', err)

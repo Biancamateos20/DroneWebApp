@@ -32,19 +32,15 @@ export default {
       map: null,
       error: null,
       loading: false,
-      markers: {}, // { [alias]: L.Marker }
+
+      // markers[alias] = { dot: L.CircleMarker, acc: L.Circle }
+      markers: {},
+
       polling: null,
       mapReady: false,
 
-      // capas base
       layerEsri: null,
-      layerPnoaProvWms: null,
-
-      // ---- MI UBICACIÓN (ADMIN) ----
-      myWatchId: null,
-      myMarker: null,
-      myAccuracyCircle: null,
-      followMe: true // ponlo a false si NO quieres que el mapa te siga
+      layerPnoaProvWms: null
     }
   },
 
@@ -56,8 +52,6 @@ export default {
     if (this.polling) clearInterval(this.polling)
     this.polling = null
 
-    this.stopMyLocationWatch()
-
     if (this.map) {
       this.map.remove()
       this.map = null
@@ -65,23 +59,6 @@ export default {
   },
 
   methods: {
-    createPinIcon(color) {
-      const svg = `
-        <svg width="36" height="36" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-          <path d="M12 22s7-5.2 7-12a7 7 0 1 0-14 0c0 6.8 7 12 7 12z"
-                fill="${color}" stroke="white" stroke-width="1.5" />
-          <circle cx="12" cy="10" r="2.7" fill="white" opacity="0.9"/>
-        </svg>
-      `
-      return L.divIcon({
-        className: 'player-pin',
-        html: svg,
-        iconSize: [36, 36],
-        iconAnchor: [18, 34],
-        popupAnchor: [0, -30]
-      })
-    },
-
     initMap() {
       const container = L.DomUtil.get('map')
       if (container) container._leaflet_id = null
@@ -96,10 +73,8 @@ export default {
           const lat = pos.coords.latitude
           const lon = pos.coords.longitude
 
-          // maxZoom 19 para evitar “zoom falso” borroso
           this.map = L.map('map', { maxZoom: 19 }).setView([lat, lon], 18.5)
 
-          // ====== BASES ======
           this.layerEsri = L.tileLayer(
             'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             { maxZoom: 19, attribution: 'Tiles © Esri' }
@@ -118,7 +93,6 @@ export default {
             }
           )
 
-          // Por defecto: la más actual (según tu caso)
           this.layerPnoaProvWms.addTo(this.map)
 
           L.control.layers(
@@ -130,10 +104,6 @@ export default {
             { position: 'topright' }
           ).addTo(this.map)
 
-          // ====== MI UBICACIÓN EN TIEMPO REAL ======
-          this.startMyLocationWatch()
-
-          // ====== JUGADORES ======
           this.mapReady = true
           this.cargarJugadores()
           this.startPolling()
@@ -145,93 +115,32 @@ export default {
       )
     },
 
-    // --------- WATCH ADMIN LOCATION ---------
-    startMyLocationWatch() {
-      if (!('geolocation' in navigator)) return
-      if (this.myWatchId != null) return
-
-      const options = {
-        enableHighAccuracy: true,
-        maximumAge: 0,
-        timeout: 20000
-      }
-
-      this.myWatchId = navigator.geolocation.watchPosition(
-        this.onMyGeoSuccess,
-        this.onMyGeoError,
-        options
-      )
-    },
-
-    stopMyLocationWatch() {
-      if (this.myWatchId != null) {
-        navigator.geolocation.clearWatch(this.myWatchId)
-        this.myWatchId = null
-      }
-
-      if (this.myMarker) {
-        this.myMarker.remove()
-        this.myMarker = null
-      }
-
-      if (this.myAccuracyCircle) {
-        this.myAccuracyCircle.remove()
-        this.myAccuracyCircle = null
-      }
-    },
-
-    onMyGeoSuccess(pos) {
-      if (!this.map) return
-
-      const { latitude, longitude, accuracy } = pos.coords
-      const latlng = [latitude, longitude]
-
-      // Marker “yo” (azul) + círculo de precisión
-      if (!this.myMarker) {
-        this.myMarker = L.circleMarker(latlng, {
-          radius: 7,
-          weight: 2,
-          color: '#ffffff',
-          fillColor: '#2e86ff',
-          fillOpacity: 0.9
-        })
-          .addTo(this.map)
-          .bindPopup('Mi ubicación (admin)')
-      } else {
-        this.myMarker.setLatLng(latlng)
-      }
-
-      if (!this.myAccuracyCircle) {
-        this.myAccuracyCircle = L.circle(latlng, {
-          radius: Math.max(accuracy || 0, 1),
-          weight: 1,
-          color: '#2e86ff',
-          fillColor: '#2e86ff',
-          fillOpacity: 0.15
-        }).addTo(this.map)
-      } else {
-        this.myAccuracyCircle.setLatLng(latlng)
-        this.myAccuracyCircle.setRadius(Math.max(accuracy || 0, 1))
-      }
-
-      // Si quieres que el mapa te siga
-      if (this.followMe) {
-        this.map.panTo(latlng, { animate: true })
-      }
-    },
-
-    onMyGeoError(err) {
-      console.warn('Error geolocalización (admin):', err)
-      // No lo pongo en UI para que no moleste, pero si quieres:
-      // this.error = 'Error geolocalización (admin)'
-    },
-
-    // --------- POLLING JUGADORES ---------
     startPolling() {
       if (this.polling) clearInterval(this.polling)
       this.polling = setInterval(() => {
         if (this.mapReady) this.cargarJugadores()
-      }, 2000)
+      }, 1000) // 1s para que lo veas más “en vivo”
+    },
+
+    // Crea el “punto” estilo ubicación, pero del color del jugador
+    createPlayerDot(color, latlng) {
+      const dot = L.circleMarker(latlng, {
+        radius: 7,
+        weight: 2,
+        color: '#ffffff',
+        fillColor: color,
+        fillOpacity: 0.95
+      })
+
+      const acc = L.circle(latlng, {
+        radius: 5, // luego se actualiza con precision
+        weight: 1,
+        color: color,
+        fillColor: color,
+        fillOpacity: 0.15
+      })
+
+      return { dot, acc }
     },
 
     async cargarJugadores() {
@@ -243,13 +152,15 @@ export default {
         const jugadores = await res.json()
         if (!Array.isArray(jugadores)) return
 
+        // Limpia jugadores que ya no estén (por reset)
         const vivos = new Set(
           jugadores.map((j) => j?.alias).filter((a) => typeof a === 'string' && a.length > 0)
         )
 
         Object.keys(this.markers).forEach((alias) => {
           if (!vivos.has(alias)) {
-            this.markers[alias].remove()
+            this.markers[alias].dot.remove()
+            this.markers[alias].acc.remove()
             delete this.markers[alias]
           }
         })
@@ -257,22 +168,34 @@ export default {
         jugadores.forEach((j) => {
           if (!j || j.lat == null || j.lon == null || !j.alias) return
 
-          const pos = [Number(j.lat), Number(j.lon)]
-          if (Number.isNaN(pos[0]) || Number.isNaN(pos[1])) return
+          const lat = Number(j.lat)
+          const lon = Number(j.lon)
+          if (Number.isNaN(lat) || Number.isNaN(lon)) return
 
-          if (this.markers[j.alias]) {
-            this.markers[j.alias].setLatLng(pos)
-            return
+          const pos = [lat, lon]
+          const color = j.alias // en tu sistema alias == color
+          const precision = Number(j.precision ?? 0)
+
+          if (!this.markers[color]) {
+            const { dot, acc } = this.createPlayerDot(color, pos)
+            dot.addTo(this.map).bindPopup(`Jugador ${color}`)
+            acc.addTo(this.map)
+
+            this.markers[color] = { dot, acc }
+          } else {
+            this.markers[color].dot.setLatLng(pos)
+            this.markers[color].acc.setLatLng(pos)
           }
 
-          // Mantengo tu lógica: alias actúa como color (si alias es un nombre, usa j.color)
-          const icon = this.createPinIcon(j.alias)
-
-          const marker = L.marker(pos, { icon })
-            .addTo(this.map)
-            .bindPopup(`Jugador ${j.alias}`)
-
-          this.markers[j.alias] = marker
+          // Actualiza círculo de precisión (si viene)
+          if (!Number.isNaN(precision) && precision > 0) {
+            // cap para que no te tape el mapa si da 1000m
+            const capped = Math.min(precision, 200)
+            this.markers[color].acc.setRadius(capped)
+          } else {
+            // si no hay precision, lo minimizamos
+            this.markers[color].acc.setRadius(5)
+          }
         })
       } catch (e) {
         console.error('Error cargando jugadores', e)
@@ -282,6 +205,7 @@ export default {
     async iniciarJuego() {
       this.error = null
       this.loading = true
+
       try {
         const res = await fetch('/api/iniciar-juego', { method: 'POST' })
         if (!res.ok) {
@@ -299,7 +223,12 @@ export default {
       this.error = null
       try {
         await fetch('/api/reset', { method: 'POST' })
-        Object.values(this.markers).forEach((m) => m.remove())
+
+        // limpia todo en el mapa
+        Object.values(this.markers).forEach(({ dot, acc }) => {
+          dot.remove()
+          acc.remove()
+        })
         this.markers = {}
       } catch {
         this.error = 'Error al parar el juego'
@@ -365,34 +294,14 @@ export default {
   color: #003320;
 }
 
-.btn.start:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 30px rgba(0, 255, 136, 0.35);
-}
-
-.btn.start:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
 .btn.stop {
   background: linear-gradient(135deg, #ff4d4d, #d63031);
   color: white;
-}
-
-.btn.stop:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 30px rgba(255, 77, 77, 0.35);
 }
 
 .error {
   margin-top: 30px;
   color: #ff6b6b;
   font-weight: 600;
-}
-
-:deep(.player-pin) {
-  background: transparent;
-  border: none;
 }
 </style>
