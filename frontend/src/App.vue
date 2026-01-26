@@ -12,13 +12,9 @@
       @start-game="goToWebRTC"
     />
 
-    <IniciarJuego
-      v-else-if="screen === 'admin'"
-    />
+    <IniciarJuego v-else-if="screen === 'admin'" />
 
-    <WebRTC
-      v-else-if="screen === 'webrtc'"
-    />
+    <WebRTC v-else-if="screen === 'webrtc'" />
   </div>
 </template>
 
@@ -45,30 +41,137 @@ export default {
 
       watchId: null,
       lastSentAt: 0,
-      lastSentCoords: null
+      lastSentCoords: null,
+
+      // solo para detectar el reset del admin
+      estadoPoll: null,
+      lastResetId: null
     }
   },
 
   methods: {
-
-    handleLoginSuccess(data) {
+    async handleLoginSuccess(data) {
       console.log('Login jugador:', data)
       this.userAlias = data.color
       this.screen = 'waiting'
 
+      // 1) lee estado al entrar (para guardar reset_id actual)
+      await this.syncEstadoJuegoOnce()
+
+      // 2) registra al jugador INMEDIATAMENTE para que aparezca ya en el mapa admin
+      await this.registerPlayerOnce()
+
+      // 3) arranca live + polling de reset
       this.startLiveLocation()
+      this.startEstadoJuegoPolling()
     },
 
     handleAdminLogin() {
       console.log('Login administrador')
       this.screen = 'admin'
+
+      // al ser admin, no rastreamos como jugador
+      this.stopLiveLocation()
+      this.stopEstadoJuegoPolling()
+      this.userAlias = null
     },
 
     goToWebRTC() {
       console.log('Juego iniciado → jugadores a WebRTC')
       this.screen = 'webrtc'
+      // No paramos el tracking: debe seguir hasta reset del admin
     },
 
+    // ---------------------------
+    // Estado juego: solo nos importa reset_id
+    // ---------------------------
+    async syncEstadoJuegoOnce() {
+      try {
+        const r = await fetch('/api/estado-juego')
+        if (!r.ok) return
+        const data = await r.json()
+        if (typeof data.reset_id === 'number') {
+          this.lastResetId = data.reset_id
+        }
+      } catch {
+        // silencioso
+      }
+    },
+
+    startEstadoJuegoPolling() {
+      if (this.estadoPoll) return
+
+      this.estadoPoll = setInterval(async () => {
+        try {
+          const r = await fetch('/api/estado-juego')
+          if (!r.ok) return
+          const data = await r.json()
+
+          // Si cambia reset_id => admin ha pulsado Parar/Reset
+          if (typeof data.reset_id === 'number' && this.lastResetId != null) {
+            if (data.reset_id !== this.lastResetId) {
+              console.log('Detectado RESET del admin → paro ubicación live')
+              this.stopLiveLocation()
+              this.stopEstadoJuegoPolling()
+              // opcional: volver a login automáticamente
+              // this.screen = 'login'
+              // this.userAlias = null
+            }
+          }
+
+          if (typeof data.reset_id === 'number') {
+            this.lastResetId = data.reset_id
+          }
+        } catch {
+          // silencioso
+        }
+      }, 1000)
+    },
+
+    stopEstadoJuegoPolling() {
+      if (this.estadoPoll) {
+        clearInterval(this.estadoPoll)
+        this.estadoPoll = null
+      }
+    },
+
+    // ---------------------------
+    // Registro inmediato para que el admin lo vea YA
+    // ---------------------------
+    async registerPlayerOnce() {
+      if (!this.userAlias) return
+      if (!('geolocation' in navigator)) return
+
+      const pos = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(
+          resolve,
+          reject,
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        )
+      }).catch(() => null)
+
+      if (!pos) return
+
+      const { latitude, longitude } = pos.coords
+
+      try {
+        await fetch('/api/jugador', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            alias: this.userAlias,
+            lat: latitude,
+            lon: longitude
+          })
+        })
+      } catch {
+        // silencioso
+      }
+    },
+
+    // ---------------------------
+    // Geo utils
+    // ---------------------------
     haversineMeters(lat1, lon1, lat2, lon2) {
       const R = 6371000
       const toRad = d => (d * Math.PI) / 180
@@ -80,14 +183,12 @@ export default {
       return 2 * R * Math.asin(Math.sqrt(a))
     },
 
+    // ---------------------------
+    // Live location (SIEMPRE hasta reset)
+    // ---------------------------
     startLiveLocation() {
       if (!this.userAlias) return
-
-      if (!('geolocation' in navigator)) {
-        console.warn('Geolocalización no soportada')
-        return
-      }
-
+      if (!('geolocation' in navigator)) return
       if (this.watchId != null) return
 
       const options = {
@@ -96,9 +197,10 @@ export default {
         timeout: 20000
       }
 
+      // arrow functions para no perder this
       this.watchId = navigator.geolocation.watchPosition(
-        this.onGeoSuccess,
-        this.onGeoError,
+        (pos) => this.onGeoSuccess(pos),
+        (err) => this.onGeoError(err),
         options
       )
     },
@@ -108,6 +210,8 @@ export default {
         navigator.geolocation.clearWatch(this.watchId)
         this.watchId = null
       }
+      this.lastSentAt = 0
+      this.lastSentCoords = null
     },
 
     async onGeoSuccess(pos) {
@@ -116,11 +220,13 @@ export default {
       const { latitude, longitude, accuracy } = pos.coords
       const ts = pos.timestamp || Date.now()
 
+      // Throttle y movimiento mínimo (tu lógica)
       const THROTTLE_MS = 250
       const MIN_MOVE_M = 0.8
       const now = Date.now()
 
-      if (now - this.lastSentAt < THROTTLE_MS) return
+      // PERO: el primer envío debe entrar sí o sí
+      if (this.lastSentAt && now - this.lastSentAt < THROTTLE_MS) return
 
       if (this.lastSentCoords) {
         const moved = this.haversineMeters(
@@ -130,7 +236,6 @@ export default {
           longitude
         )
         const improvedAccuracy = accuracy < (this.lastSentCoords.accuracy ?? 1e9)
-
         if (moved < MIN_MOVE_M && !improvedAccuracy) return
       }
 
@@ -150,6 +255,7 @@ export default {
           })
         })
 
+        // fallback si no estaba registrado
         if (!r.ok) {
           await fetch('/api/jugador', {
             method: 'POST',
@@ -172,6 +278,7 @@ export default {
   },
 
   beforeUnmount() {
+    this.stopEstadoJuegoPolling()
     this.stopLiveLocation()
   }
 }

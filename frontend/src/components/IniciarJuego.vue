@@ -38,7 +38,13 @@ export default {
 
       // capas base
       layerEsri: null,
-      layerPnoaProvWms: null
+      layerPnoaProvWms: null,
+
+      // ---- MI UBICACIÓN (ADMIN) ----
+      myWatchId: null,
+      myMarker: null,
+      myAccuracyCircle: null,
+      followMe: true // ponlo a false si NO quieres que el mapa te siga
     }
   },
 
@@ -49,6 +55,8 @@ export default {
   beforeUnmount() {
     if (this.polling) clearInterval(this.polling)
     this.polling = null
+
+    this.stopMyLocationWatch()
 
     if (this.map) {
       this.map.remove()
@@ -75,7 +83,6 @@ export default {
     },
 
     initMap() {
-      // Evita: "Map container is already initialized"
       const container = L.DomUtil.get('map')
       if (container) container._leaflet_id = null
 
@@ -89,55 +96,44 @@ export default {
           const lat = pos.coords.latitude
           const lon = pos.coords.longitude
 
-          // Limita maxZoom para evitar "zoom falso" (se ve borroso por reescalado)
+          // maxZoom 19 para evitar “zoom falso” borroso
           this.map = L.map('map', { maxZoom: 19 }).setView([lat, lon], 18.5)
 
-          // ========= Base 1: Esri World Imagery (rápida y nítida) =========
+          // ====== BASES ======
           this.layerEsri = L.tileLayer(
             'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            {
-              maxZoom: 19,
-              attribution: 'Tiles © Esri'
-            }
+            { maxZoom: 19, attribution: 'Tiles © Esri' }
           )
 
-          // ========= Base 2: PNOA PROVISIONALES (WMS) — más reciente si hay cobertura =========
-          // Mejora nitidez:
-          // - tileSize: 512 → pide más píxeles por tile (mejor definición)
-          // - detectRetina: true → en pantallas retina pide densidad adecuada
           this.layerPnoaProvWms = L.tileLayer.wms(
             'https://wms-pnoa.idee.es/pnoa-provisionales',
             {
               layers: 'OrtoimagenRapida',
-              format: 'image/jpeg', // prueba 'image/png' si quieres menos artefactos (más pesado)
+              format: 'image/jpeg',
               transparent: false,
-
-              // CLAVES PARA MEJORAR CALIDAD
               tileSize: 512,
               detectRetina: true,
-
-              // Evita sobre-zoom
               maxZoom: 19,
-
               attribution: '© IGN PNOA (Provisional)'
             }
           )
 
-          // Por defecto: PNOA Provisional (la más actual en tu caso)
+          // Por defecto: la más actual (según tu caso)
           this.layerPnoaProvWms.addTo(this.map)
 
-          // Selector de capas
-          L.control
-            .layers(
-              {
-                'IGN PNOA Provisional (OrtoimagenRapida)': this.layerPnoaProvWms,
-                'Esri World Imagery': this.layerEsri
-              },
-              null,
-              { position: 'topright' }
-            )
-            .addTo(this.map)
+          L.control.layers(
+            {
+              'IGN PNOA Provisional (OrtoimagenRapida)': this.layerPnoaProvWms,
+              'Esri World Imagery': this.layerEsri
+            },
+            null,
+            { position: 'topright' }
+          ).addTo(this.map)
 
+          // ====== MI UBICACIÓN EN TIEMPO REAL ======
+          this.startMyLocationWatch()
+
+          // ====== JUGADORES ======
           this.mapReady = true
           this.cargarJugadores()
           this.startPolling()
@@ -149,6 +145,88 @@ export default {
       )
     },
 
+    // --------- WATCH ADMIN LOCATION ---------
+    startMyLocationWatch() {
+      if (!('geolocation' in navigator)) return
+      if (this.myWatchId != null) return
+
+      const options = {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 20000
+      }
+
+      this.myWatchId = navigator.geolocation.watchPosition(
+        this.onMyGeoSuccess,
+        this.onMyGeoError,
+        options
+      )
+    },
+
+    stopMyLocationWatch() {
+      if (this.myWatchId != null) {
+        navigator.geolocation.clearWatch(this.myWatchId)
+        this.myWatchId = null
+      }
+
+      if (this.myMarker) {
+        this.myMarker.remove()
+        this.myMarker = null
+      }
+
+      if (this.myAccuracyCircle) {
+        this.myAccuracyCircle.remove()
+        this.myAccuracyCircle = null
+      }
+    },
+
+    onMyGeoSuccess(pos) {
+      if (!this.map) return
+
+      const { latitude, longitude, accuracy } = pos.coords
+      const latlng = [latitude, longitude]
+
+      // Marker “yo” (azul) + círculo de precisión
+      if (!this.myMarker) {
+        this.myMarker = L.circleMarker(latlng, {
+          radius: 7,
+          weight: 2,
+          color: '#ffffff',
+          fillColor: '#2e86ff',
+          fillOpacity: 0.9
+        })
+          .addTo(this.map)
+          .bindPopup('Mi ubicación (admin)')
+      } else {
+        this.myMarker.setLatLng(latlng)
+      }
+
+      if (!this.myAccuracyCircle) {
+        this.myAccuracyCircle = L.circle(latlng, {
+          radius: Math.max(accuracy || 0, 1),
+          weight: 1,
+          color: '#2e86ff',
+          fillColor: '#2e86ff',
+          fillOpacity: 0.15
+        }).addTo(this.map)
+      } else {
+        this.myAccuracyCircle.setLatLng(latlng)
+        this.myAccuracyCircle.setRadius(Math.max(accuracy || 0, 1))
+      }
+
+      // Si quieres que el mapa te siga
+      if (this.followMe) {
+        this.map.panTo(latlng, { animate: true })
+      }
+    },
+
+    onMyGeoError(err) {
+      console.warn('Error geolocalización (admin):', err)
+      // No lo pongo en UI para que no moleste, pero si quieres:
+      // this.error = 'Error geolocalización (admin)'
+    },
+
+    // --------- POLLING JUGADORES ---------
     startPolling() {
       if (this.polling) clearInterval(this.polling)
       this.polling = setInterval(() => {
@@ -165,10 +243,10 @@ export default {
         const jugadores = await res.json()
         if (!Array.isArray(jugadores)) return
 
-        // Limpia markers de jugadores que ya no estén
         const vivos = new Set(
           jugadores.map((j) => j?.alias).filter((a) => typeof a === 'string' && a.length > 0)
         )
+
         Object.keys(this.markers).forEach((alias) => {
           if (!vivos.has(alias)) {
             this.markers[alias].remove()
@@ -187,8 +265,7 @@ export default {
             return
           }
 
-          // Mantengo tu lógica: alias actúa como color.
-          // Si alias es un nombre, cambia a: const icon = this.createPinIcon(j.color)
+          // Mantengo tu lógica: alias actúa como color (si alias es un nombre, usa j.color)
           const icon = this.createPinIcon(j.alias)
 
           const marker = L.marker(pos, { icon })
@@ -317,10 +394,5 @@ export default {
 :deep(.player-pin) {
   background: transparent;
   border: none;
-}
-
-/* Opcional: mejora perceptiva en algunos navegadores */
-:deep(.leaflet-tile) {
-  image-rendering: -webkit-optimize-contrast;
 }
 </style>
