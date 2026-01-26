@@ -21,6 +21,7 @@ juego_en_curso = False
 # Guardamos jugadores para que el panel admin pueda pintarlos en el mapa
 # Cada item: {"lat": float, "lon": float, "alias": str (hex color)}
 jugadores = []
+reset_id = 0
 
 
 # ===============================
@@ -157,11 +158,12 @@ def iniciar_juego():
 # ===============================
 @app.route("/reset", methods=["POST"])
 def reset():
-    global juego_en_curso, colores_ocupados, jugadores
+    global juego_en_curso, colores_ocupados, jugadores, reset_id
 
     colores_ocupados.clear()
     jugadores.clear()
     juego_en_curso = False
+    reset_id += 1
     print("Juego reseteado (proxy)")
 
     try:
@@ -169,7 +171,8 @@ def reset():
     except Exception as e:
         print("⚠️ No se pudo resetear VM (continuo igual):", e)
 
-    return jsonify({"status": "reset ok"}), 200
+    return jsonify({"status": "reset ok", "reset_id": reset_id}), 200
+
 
 
 # ===============================
@@ -184,7 +187,11 @@ def webrtc():
 
 @app.route("/estado-juego", methods=["GET"])
 def estado_juego():
-    return jsonify({"juego_en_curso": juego_en_curso}), 200
+    return jsonify({
+        "juego_en_curso": juego_en_curso,
+        "reset_id": reset_id
+    }), 200
+
 
 
 # ===============================
