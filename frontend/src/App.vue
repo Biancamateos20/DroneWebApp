@@ -247,7 +247,6 @@ async onGeoSuccess(pos) {
     if (moved < MIN_MOVE_M && !improvedAccuracy) return
   }
 
-  // Guardamos "último envío" (ojo: aquí, no antes)
   this.lastSentAt = now
   this.lastSentCoords = { lat: latitude, lon: longitude, accuracy }
 
@@ -256,7 +255,7 @@ async onGeoSuccess(pos) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        alias: this.userAlias,     // en tu sistema alias == color
+        alias: this.userAlias,
         lat: latitude,
         lon: longitude,
         precision: accuracy,
