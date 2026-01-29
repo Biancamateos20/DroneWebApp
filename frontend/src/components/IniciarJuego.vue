@@ -73,8 +73,10 @@ export default {
           const lat = pos.coords.latitude
           const lon = pos.coords.longitude
 
+          // maxZoom 19 evita “zoom falso” borroso en WMS
           this.map = L.map('map', { maxZoom: 19 }).setView([lat, lon], 18.5)
 
+          // ====== BASES ======
           this.layerEsri = L.tileLayer(
             'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             { maxZoom: 19, attribution: 'Tiles © Esri' }
@@ -84,7 +86,7 @@ export default {
             'https://wms-pnoa.idee.es/pnoa-provisionales',
             {
               layers: 'OrtoimagenRapida',
-              format: 'image/jpeg',
+              format: 'image/jpeg', // prueba image/png si quieres, pesa más
               transparent: false,
               tileSize: 512,
               detectRetina: true,
@@ -93,16 +95,19 @@ export default {
             }
           )
 
+          // Por defecto: PNOA Provisional (tu más actual)
           this.layerPnoaProvWms.addTo(this.map)
 
-          L.control.layers(
-            {
-              'IGN PNOA Provisional (OrtoimagenRapida)': this.layerPnoaProvWms,
-              'Esri World Imagery': this.layerEsri
-            },
-            null,
-            { position: 'topright' }
-          ).addTo(this.map)
+          L.control
+            .layers(
+              {
+                'IGN PNOA Provisional (OrtoimagenRapida)': this.layerPnoaProvWms,
+                'Esri World Imagery': this.layerEsri
+              },
+              null,
+              { position: 'topright' }
+            )
+            .addTo(this.map)
 
           this.mapReady = true
           this.cargarJugadores()
@@ -117,13 +122,19 @@ export default {
 
     startPolling() {
       if (this.polling) clearInterval(this.polling)
+
+      // 500ms = sensación “Google Maps” (sin websockets)
       this.polling = setInterval(() => {
         if (this.mapReady) this.cargarJugadores()
-      }, 1000) // 1s para que lo veas más “en vivo”
+      }, 500)
     },
 
-    // Crea el “punto” estilo ubicación, pero del color del jugador
-    createPlayerDot(color, latlng) {
+    ensurePlayerLayers(aliasColor, latlng) {
+      // aliasColor en tu sistema == color hex
+      const color = aliasColor
+
+      if (this.markers[aliasColor]) return this.markers[aliasColor]
+
       const dot = L.circleMarker(latlng, {
         radius: 7,
         weight: 2,
@@ -131,16 +142,19 @@ export default {
         fillColor: color,
         fillOpacity: 0.95
       })
+        .addTo(this.map)
+        .bindPopup(`Jugador ${aliasColor}`)
 
       const acc = L.circle(latlng, {
-        radius: 5, // luego se actualiza con precision
+        radius: 5,
         weight: 1,
-        color: color,
+        color,
         fillColor: color,
         fillOpacity: 0.15
-      })
+      }).addTo(this.map)
 
-      return { dot, acc }
+      this.markers[aliasColor] = { dot, acc }
+      return this.markers[aliasColor]
     },
 
     async cargarJugadores() {
@@ -152,18 +166,8 @@ export default {
         const jugadores = await res.json()
         if (!Array.isArray(jugadores)) return
 
-        // Limpia jugadores que ya no estén (por reset)
-        const vivos = new Set(
-          jugadores.map((j) => j?.alias).filter((a) => typeof a === 'string' && a.length > 0)
-        )
-
-        Object.keys(this.markers).forEach((alias) => {
-          if (!vivos.has(alias)) {
-            this.markers[alias].dot.remove()
-            this.markers[alias].acc.remove()
-            delete this.markers[alias]
-          }
-        })
+        const now = Date.now()
+        const OFFLINE_MS = 8000 // si no actualiza en 8s => offline (pero NO se borra)
 
         jugadores.forEach((j) => {
           if (!j || j.lat == null || j.lon == null || !j.alias) return
@@ -172,30 +176,34 @@ export default {
           const lon = Number(j.lon)
           if (Number.isNaN(lat) || Number.isNaN(lon)) return
 
+          const alias = j.alias              // en tu caso alias = color
           const pos = [lat, lon]
-          const color = j.alias // en tu sistema alias == color
           const precision = Number(j.precision ?? 0)
+          const ts = Number(j.ts ?? 0)
 
-          if (!this.markers[color]) {
-            const { dot, acc } = this.createPlayerDot(color, pos)
-            dot.addTo(this.map).bindPopup(`Jugador ${color}`)
-            acc.addTo(this.map)
+          const age = ts ? now - ts : 0
+          const offline = ts ? age > OFFLINE_MS : false
 
-            this.markers[color] = { dot, acc }
-          } else {
-            this.markers[color].dot.setLatLng(pos)
-            this.markers[color].acc.setLatLng(pos)
-          }
+          const layers = this.ensurePlayerLayers(alias, pos)
 
-          // Actualiza círculo de precisión (si viene)
-          if (!Number.isNaN(precision) && precision > 0) {
-            // cap para que no te tape el mapa si da 1000m
-            const capped = Math.min(precision, 200)
-            this.markers[color].acc.setRadius(capped)
-          } else {
-            // si no hay precision, lo minimizamos
-            this.markers[color].acc.setRadius(5)
-          }
+          // mueve el “punto” y el círculo
+          layers.dot.setLatLng(pos)
+          layers.acc.setLatLng(pos)
+
+          // radio de precisión (cap para no tapar todo)
+          const capped = !Number.isNaN(precision) && precision > 0 ? Math.min(precision, 200) : 5
+          layers.acc.setRadius(capped)
+
+          // offline => baja opacidad, pero NO desaparece
+          layers.dot.setStyle({
+            opacity: offline ? 0.35 : 1,
+            fillOpacity: offline ? 0.25 : 0.95
+          })
+
+          layers.acc.setStyle({
+            opacity: offline ? 0.2 : 1,
+            fillOpacity: offline ? 0.05 : 0.15
+          })
         })
       } catch (e) {
         console.error('Error cargando jugadores', e)
@@ -224,7 +232,7 @@ export default {
       try {
         await fetch('/api/reset', { method: 'POST' })
 
-        // limpia todo en el mapa
+        // limpia todo en el mapa solo aquí (reset)
         Object.values(this.markers).forEach(({ dot, acc }) => {
           dot.remove()
           acc.remove()
@@ -297,6 +305,11 @@ export default {
 .btn.stop {
   background: linear-gradient(135deg, #ff4d4d, #d63031);
   color: white;
+}
+
+.btn.start:hover:not(:disabled),
+.btn.stop:hover {
+  transform: translateY(-2px);
 }
 
 .error {

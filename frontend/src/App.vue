@@ -114,8 +114,8 @@ export default {
               this.stopLiveLocation()
               this.stopEstadoJuegoPolling()
               // opcional: volver a login automáticamente
-              // this.screen = 'login'
-              // this.userAlias = null
+              this.screen = 'login'
+              this.userAlias = null
             }
           }
 
@@ -223,9 +223,9 @@ async onGeoSuccess(pos) {
   const now = Date.now()
 
   // Ajustes
-  const THROTTLE_MS = 250          // no más de ~4 envíos/seg
-  const FORCE_EVERY_MS = 1000      // aunque no te muevas, envía al menos 1 vez/seg
-  const MIN_MOVE_M = 0.8          // si no hay "force", exige mínimo movimiento
+  const THROTTLE_MS = 250
+  const FORCE_EVERY_MS = 1000
+  const MIN_MOVE_M = 0.8
 
   // Throttle duro
   if (this.lastSentAt && now - this.lastSentAt < THROTTLE_MS) return
