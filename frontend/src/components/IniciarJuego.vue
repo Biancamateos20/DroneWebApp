@@ -33,7 +33,6 @@ export default {
       error: null,
       loading: false,
 
-      // markers[alias] = { dot: L.CircleMarker, acc: L.Circle }
       markers: {},
 
       polling: null,
@@ -73,13 +72,12 @@ export default {
           const lat = pos.coords.latitude
           const lon = pos.coords.longitude
 
-          // maxZoom 19 evita “zoom falso” borroso en WMS
-          this.map = L.map('map', { maxZoom: 19 }).setView([lat, lon], 18.5)
+          this.map = L.map('map', { maxZoom: 17 }).setView([lat, lon], 18.5)
 
           // ====== BASES ======
           this.layerEsri = L.tileLayer(
             'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            { maxZoom: 19, attribution: 'Tiles © Esri' }
+            { maxZoom: 13, attribution: 'Tiles © Esri' }
           )
 
           this.layerPnoaProvWms = L.tileLayer.wms(
@@ -90,7 +88,7 @@ export default {
               transparent: false,
               tileSize: 512,
               detectRetina: true,
-              maxZoom: 19,
+              maxZoom: 16,
               attribution: '© IGN PNOA (Provisional)'
             }
           )
@@ -101,7 +99,7 @@ export default {
           L.control
             .layers(
               {
-                'IGN PNOA Provisional (OrtoimagenRapida)': this.layerPnoaProvWms,
+                'Google Maps': this.layerPnoaProvWms,
                 'Esri World Imagery': this.layerEsri
               },
               null,
