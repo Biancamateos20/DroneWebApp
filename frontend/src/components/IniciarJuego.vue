@@ -87,7 +87,7 @@ export default {
       const fallbackLon = 1.9890
 
       const start = (lat, lon) => {
-        this.map = L.map('map', { maxZoom: 20 }).setView([lat, lon], 16)
+        this.map = L.map('map', { maxZoom: 20 }).setView([lat, lon], 18)
 
         this.layerEsri = L.tileLayer(
           'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
