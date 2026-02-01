@@ -1,0 +1,12 @@
+name = "dee-live"
+main = "src/worker.js"
+compatibility_date = "2026-01-31"
+
+[durable_objects]
+bindings = [
+  { name = "PARTY", class_name = "PartyDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PartyDO"]
