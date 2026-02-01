@@ -23,6 +23,7 @@
 <script>
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { LiveWS } from '../services/liveWS'
 
 export default {
   name: 'IniciarJuego',
@@ -32,25 +33,23 @@ export default {
       map: null,
       error: null,
       loading: false,
-
+      mapReady: false,
       markers: {},
 
-      polling: null,
-      mapReady: false,
-
       layerEsri: null,
-      layerPnoaProvWms: null
+      layerPnoaProvWms: null,
+
+      live: null
     }
   },
 
   mounted() {
     this.initMap()
+    this.initWS()
   },
 
   beforeUnmount() {
-    if (this.polling) clearInterval(this.polling)
-    this.polling = null
-
+    this.live?.disconnect()
     if (this.map) {
       this.map.remove()
       this.map = null
@@ -58,83 +57,86 @@ export default {
   },
 
   methods: {
+    initWS() {
+      this.live = new LiveWS()
+
+      this.live.onMessage = (msg) => {
+        if (!msg) return
+
+        if (msg.type === 'snapshot' && Array.isArray(msg.players)) {
+          msg.players.forEach(p => this.upsertPlayer(p))
+        }
+
+        if (msg.type === 'player_update' && msg.player) {
+          this.upsertPlayer(msg.player)
+        }
+
+        if (msg.type === 'reset') {
+          this.clearMarkers()
+        }
+      }
+
+      this.live.connect({ role: 'admin' })
+    },
+
     initMap() {
       const container = L.DomUtil.get('map')
       if (container) container._leaflet_id = null
 
-      if (!navigator.geolocation) {
-        this.error = 'Geolocalización no soportada'
-        return
+      const fallbackLat = 41.2766
+      const fallbackLon = 1.9890
+
+      const start = (lat, lon) => {
+        this.map = L.map('map', { maxZoom: 20 }).setView([lat, lon], 16)
+
+        this.layerEsri = L.tileLayer(
+          'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          { maxZoom: 19, attribution: 'Tiles © Esri' }
+        )
+
+        this.layerPnoaProvWms = L.tileLayer.wms(
+          'https://wms-pnoa.idee.es/pnoa-provisionales',
+          {
+            layers: 'OrtoimagenRapida',
+            format: 'image/jpeg',
+            transparent: false,
+            tileSize: 512,
+            detectRetina: true,
+            maxZoom: 19,
+            attribution: '© IGN PNOA (Provisional)'
+          }
+        )
+
+        this.layerPnoaProvWms.addTo(this.map)
+
+        L.control.layers(
+          {
+            'PNOA (Provisional)': this.layerPnoaProvWms,
+            'Esri World Imagery': this.layerEsri
+          },
+          null,
+          { position: 'topright' }
+        ).addTo(this.map)
+
+        this.$nextTick(() => this.map?.invalidateSize(true))
+        this.mapReady = true
       }
 
+      if (!navigator.geolocation) return start(fallbackLat, fallbackLon)
+
       navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const lat = pos.coords.latitude
-          const lon = pos.coords.longitude
-
-          this.map = L.map('map', { maxZoom: 17 }).setView([lat, lon], 18.5)
-
-          // ====== BASES ======
-          this.layerEsri = L.tileLayer(
-            'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            { maxZoom: 13, attribution: 'Tiles © Esri' }
-          )
-
-          this.layerPnoaProvWms = L.tileLayer.wms(
-            'https://wms-pnoa.idee.es/pnoa-provisionales',
-            {
-              layers: 'OrtoimagenRapida',
-              format: 'image/jpeg', // prueba image/png si quieres, pesa más
-              transparent: false,
-              tileSize: 512,
-              detectRetina: true,
-              maxZoom: 16,
-              attribution: '© IGN PNOA (Provisional)'
-            }
-          )
-
-          // Por defecto: PNOA Provisional (tu más actual)
-          this.layerPnoaProvWms.addTo(this.map)
-
-          L.control
-            .layers(
-              {
-                'Google Maps': this.layerPnoaProvWms,
-                'Esri World Imagery': this.layerEsri
-              },
-              null,
-              { position: 'topright' }
-            )
-            .addTo(this.map)
-
-          this.mapReady = true
-          this.cargarJugadores()
-          this.startPolling()
-        },
-        () => {
-          this.error = 'No se pudo obtener la ubicación'
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        (pos) => start(pos.coords.latitude, pos.coords.longitude),
+        () => start(fallbackLat, fallbackLon),
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
       )
     },
 
-    startPolling() {
-      if (this.polling) clearInterval(this.polling)
-
-      // 500ms = sensación “Google Maps” (sin websockets)
-      this.polling = setInterval(() => {
-        if (this.mapReady) this.cargarJugadores()
-      }, 500)
-    },
-
     ensurePlayerLayers(aliasColor, latlng) {
-      // aliasColor en tu sistema == color hex
       const color = aliasColor
-
       if (this.markers[aliasColor]) return this.markers[aliasColor]
 
       const dot = L.circleMarker(latlng, {
-        radius: 7,
+        radius: 6,
         weight: 2,
         color: '#ffffff',
         fillColor: color,
@@ -155,71 +157,64 @@ export default {
       return this.markers[aliasColor]
     },
 
-    async cargarJugadores() {
+    upsertPlayer(p) {
       if (!this.mapReady || !this.map) return
+      if (!p || !p.alias || p.lat == null || p.lon == null) return
 
-      try {
-        const res = await fetch('/api/jugadores')
-        if (!res.ok) return
-        const jugadores = await res.json()
-        if (!Array.isArray(jugadores)) return
+      const alias = String(p.alias)
+      const lat = Number(p.lat)
+      const lon = Number(p.lon)
+      if (Number.isNaN(lat) || Number.isNaN(lon)) return
 
-        const now = Date.now()
-        const OFFLINE_MS = 8000 // si no actualiza en 8s => offline (pero NO se borra)
+      const precision = Number(p.precision ?? 0)
+      const ts = Number(p.ts ?? 0)
 
-        jugadores.forEach((j) => {
-          if (!j || j.lat == null || j.lon == null || !j.alias) return
+      const now = Date.now()
+      const OFFLINE_MS = 8000
+      const offline = ts ? (now - ts > OFFLINE_MS) : false
 
-          const lat = Number(j.lat)
-          const lon = Number(j.lon)
-          if (Number.isNaN(lat) || Number.isNaN(lon)) return
+      const pos = [lat, lon]
+      const layers = this.ensurePlayerLayers(alias, pos)
 
-          const alias = j.alias              // en tu caso alias = color
-          const pos = [lat, lon]
-          const precision = Number(j.precision ?? 0)
-          const ts = Number(j.ts ?? 0)
+      layers.dot.setLatLng(pos)
+      layers.acc.setLatLng(pos)
 
-          const age = ts ? now - ts : 0
-          const offline = ts ? age > OFFLINE_MS : false
+      const capped = !Number.isNaN(precision) && precision > 0 ? Math.min(precision, 200) : 5
+      layers.acc.setRadius(capped)
 
-          const layers = this.ensurePlayerLayers(alias, pos)
+      layers.dot.setStyle({
+        opacity: offline ? 0.35 : 1,
+        fillOpacity: offline ? 0.25 : 0.95
+      })
 
-          // mueve el “punto” y el círculo
-          layers.dot.setLatLng(pos)
-          layers.acc.setLatLng(pos)
+      layers.acc.setStyle({
+        opacity: offline ? 0.2 : 1,
+        fillOpacity: offline ? 0.05 : 0.15
+      })
+    },
 
-          // radio de precisión (cap para no tapar todo)
-          const capped = !Number.isNaN(precision) && precision > 0 ? Math.min(precision, 200) : 5
-          layers.acc.setRadius(capped)
-
-          // offline => baja opacidad, pero NO desaparece
-          layers.dot.setStyle({
-            opacity: offline ? 0.35 : 1,
-            fillOpacity: offline ? 0.25 : 0.95
-          })
-
-          layers.acc.setStyle({
-            opacity: offline ? 0.2 : 1,
-            fillOpacity: offline ? 0.05 : 0.15
-          })
-        })
-      } catch (e) {
-        console.error('Error cargando jugadores', e)
-      }
+    clearMarkers() {
+      Object.values(this.markers).forEach(({ dot, acc }) => {
+        try { dot.remove() } catch (e) { console.warn("Error", e)}
+        try { acc.remove() } catch (e) { console.warn("Error", e) }
+      })
+      this.markers = {}
     },
 
     async iniciarJuego() {
       this.error = null
       this.loading = true
-
       try {
-        const res = await fetch('/api/iniciar-juego', { method: 'POST' })
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}))
-          throw new Error(data.error || 'Error al iniciar el juego')
-        }
+        // Si tienes un backend real para misión, lo llamas aquí.
+        // En Pages puro, /api/iniciar-juego no existe salvo que lo implementes como Function.
+        // Si ahora mismo NO tienes backend público, comenta estas dos líneas:
+        // const res = await fetch('/api/iniciar-juego', { method: 'POST' })
+        // if (!res.ok) throw new Error('Error al iniciar juego')
+
+        // ✅ Esto sí es lo importante para la app:
+        this.live.startGame()
       } catch (e) {
-        this.error = e.message
+        this.error = e.message || 'Error al iniciar el juego'
       } finally {
         this.loading = false
       }
@@ -228,14 +223,12 @@ export default {
     async pararJuego() {
       this.error = null
       try {
-        await fetch('/api/reset', { method: 'POST' })
+        // Igual: si existe endpoint público para reset real, lo llamas aquí.
+        // await fetch('/api/reset', { method: 'POST' }).catch(() => {})
 
-        // limpia todo en el mapa solo aquí (reset)
-        Object.values(this.markers).forEach(({ dot, acc }) => {
-          dot.remove()
-          acc.remove()
-        })
-        this.markers = {}
+        // ✅ Reset global del live:
+        this.live.reset()
+        this.clearMarkers()
       } catch {
         this.error = 'Error al parar el juego'
       }

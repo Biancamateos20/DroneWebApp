@@ -9,7 +9,6 @@
     <SalaDeEspera
       v-else-if="screen === 'waiting'"
       :alias="userAlias"
-      @start-game="goToWebRTC"
     />
 
     <IniciarJuego v-else-if="screen === 'admin'" />
@@ -23,155 +22,74 @@ import LoginView from './components/LoginView.vue'
 import SalaDeEspera from './components/SalaDeEspera.vue'
 import IniciarJuego from './components/IniciarJuego.vue'
 import WebRTC from './components/webRTC.vue'
+import { LiveWS } from './services/liveWS'
 
 export default {
   name: 'App',
-
-  components: {
-    LoginView,
-    SalaDeEspera,
-    IniciarJuego,
-    WebRTC
-  },
+  components: { LoginView, SalaDeEspera, IniciarJuego, WebRTC },
 
   data() {
     return {
       screen: 'login',
       userAlias: null,
 
+      live: null,
       watchId: null,
-      lastSentAt: 0,
-      lastSentCoords: null,
 
-      // solo para detectar el reset del admin
-      estadoPoll: null,
-      lastResetId: null
+      lastSentAt: 0,
+      lastSentCoords: null
     }
   },
 
+  created() {
+    this.live = new LiveWS()
+
+    this.live.onMessage = (msg) => {
+      if (!msg) return
+
+      // Reset global => volver a login y parar tracking
+      if (msg.type === 'reset') {
+        this.stopLiveLocation()
+        this.screen = 'login'
+        this.userAlias = null
+      }
+
+      // Estado juego => si admin inicia, pasamos a webrtc desde sala espera
+      if (msg.type === 'game_state' && msg.juego_en_curso === true) {
+        if (this.screen === 'waiting') {
+          this.screen = 'webrtc'
+        }
+      }
+    }
+  },
+
+  beforeUnmount() {
+    this.stopLiveLocation()
+    this.live?.disconnect()
+  },
+
   methods: {
-    async handleLoginSuccess(data) {
-      console.log('Login jugador:', data)
+    handleLoginSuccess(data) {
       this.userAlias = data.color
       this.screen = 'waiting'
 
-      // 1) lee estado al entrar (para guardar reset_id actual)
-      await this.syncEstadoJuegoOnce()
+      // WS player
+      this.live.setAlias(this.userAlias)
+      this.live.connect({ role: 'player', alias: this.userAlias })
 
-      // 2) registra al jugador INMEDIATAMENTE para que aparezca ya en el mapa admin
-      await this.registerPlayerOnce()
-
-      // 3) arranca live + polling de reset
+      // tracking continuo (hasta reset)
       this.startLiveLocation()
-      this.startEstadoJuegoPolling()
     },
 
     handleAdminLogin() {
-      console.log('Login administrador')
       this.screen = 'admin'
-
-      // al ser admin, no rastreamos como jugador
       this.stopLiveLocation()
-      this.stopEstadoJuegoPolling()
       this.userAlias = null
+
+      // WS admin
+      this.live.connect({ role: 'admin' })
     },
 
-    goToWebRTC() {
-      console.log('Juego iniciado → jugadores a WebRTC')
-      this.screen = 'webrtc'
-      // No paramos el tracking: debe seguir hasta reset del admin
-    },
-
-    // ---------------------------
-    // Estado juego: solo nos importa reset_id
-    // ---------------------------
-    async syncEstadoJuegoOnce() {
-      try {
-        const r = await fetch('/api/estado-juego')
-        if (!r.ok) return
-        const data = await r.json()
-        if (typeof data.reset_id === 'number') {
-          this.lastResetId = data.reset_id
-        }
-      } catch {
-        // silencioso
-      }
-    },
-
-    startEstadoJuegoPolling() {
-      if (this.estadoPoll) return
-
-      this.estadoPoll = setInterval(async () => {
-        try {
-          const r = await fetch('/api/estado-juego')
-          if (!r.ok) return
-          const data = await r.json()
-
-          // Si cambia reset_id => admin ha pulsado Parar/Reset
-          if (typeof data.reset_id === 'number' && this.lastResetId != null) {
-            if (data.reset_id !== this.lastResetId) {
-              console.log('Detectado RESET del admin → paro ubicación live')
-              this.stopLiveLocation()
-              this.stopEstadoJuegoPolling()
-              // opcional: volver a login automáticamente
-              this.screen = 'login'
-              this.userAlias = null
-            }
-          }
-
-          if (typeof data.reset_id === 'number') {
-            this.lastResetId = data.reset_id
-          }
-        } catch {
-          // silencioso
-        }
-      }, 1000)
-    },
-
-    stopEstadoJuegoPolling() {
-      if (this.estadoPoll) {
-        clearInterval(this.estadoPoll)
-        this.estadoPoll = null
-      }
-    },
-
-    // ---------------------------
-    // Registro inmediato para que el admin lo vea YA
-    // ---------------------------
-    async registerPlayerOnce() {
-      if (!this.userAlias) return
-      if (!('geolocation' in navigator)) return
-
-      const pos = await new Promise((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(
-          resolve,
-          reject,
-          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-        )
-      }).catch(() => null)
-
-      if (!pos) return
-
-      const { latitude, longitude } = pos.coords
-
-      try {
-        await fetch('/api/jugador', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            alias: this.userAlias,
-            lat: latitude,
-            lon: longitude
-          })
-        })
-      } catch {
-        // silencioso
-      }
-    },
-
-    // ---------------------------
-    // Geo utils
-    // ---------------------------
     haversineMeters(lat1, lon1, lat2, lon2) {
       const R = 6371000
       const toRad = d => (d * Math.PI) / 180
@@ -183,9 +101,6 @@ export default {
       return 2 * R * Math.asin(Math.sqrt(a))
     },
 
-    // ---------------------------
-    // Live location (SIEMPRE hasta reset)
-    // ---------------------------
     startLiveLocation() {
       if (!this.userAlias) return
       if (!('geolocation' in navigator)) return
@@ -197,10 +112,9 @@ export default {
         timeout: 20000
       }
 
-      // arrow functions para no perder this
       this.watchId = navigator.geolocation.watchPosition(
         (pos) => this.onGeoSuccess(pos),
-        (err) => this.onGeoError(err),
+        (err) => console.warn('Error geolocalización:', err),
         options
       )
     },
@@ -214,81 +128,38 @@ export default {
       this.lastSentCoords = null
     },
 
-async onGeoSuccess(pos) {
-  if (!this.userAlias) return
+    onGeoSuccess(pos) {
+      if (!this.userAlias) return
 
-  const { latitude, longitude, accuracy } = pos.coords
-  const ts = pos.timestamp || Date.now()
+      const { latitude, longitude, accuracy } = pos.coords
+      const now = Date.now()
 
-  const now = Date.now()
+      // Ajustes: muy “Google Maps feel”
+      const THROTTLE_MS = 250
+      const FORCE_EVERY_MS = 1000
+      const MIN_MOVE_M = 0.8
 
-  // Ajustes
-  const THROTTLE_MS = 250
-  const FORCE_EVERY_MS = 1000
-  const MIN_MOVE_M = 0.8
+      if (this.lastSentAt && now - this.lastSentAt < THROTTLE_MS) return
 
-  // Throttle duro
-  if (this.lastSentAt && now - this.lastSentAt < THROTTLE_MS) return
+      const force = !this.lastSentAt || (now - this.lastSentAt >= FORCE_EVERY_MS)
 
-  // Envío forzado cada X ms (para que el admin vea updates constantes)
-  const force = !this.lastSentAt || (now - this.lastSentAt >= FORCE_EVERY_MS)
+      if (!force && this.lastSentCoords) {
+        const moved = this.haversineMeters(
+          this.lastSentCoords.lat,
+          this.lastSentCoords.lon,
+          latitude,
+          longitude
+        )
+        const improvedAccuracy = accuracy < (this.lastSentCoords.accuracy ?? 1e9)
+        if (moved < MIN_MOVE_M && !improvedAccuracy) return
+      }
 
-  // Si no es "force", aplicamos filtro de movimiento/precisión
-  if (!force && this.lastSentCoords) {
-    const moved = this.haversineMeters(
-      this.lastSentCoords.lat,
-      this.lastSentCoords.lon,
-      latitude,
-      longitude
-    )
+      this.lastSentAt = now
+      this.lastSentCoords = { lat: latitude, lon: longitude, accuracy }
 
-    const improvedAccuracy = accuracy < (this.lastSentCoords.accuracy ?? 1e9)
-
-    if (moved < MIN_MOVE_M && !improvedAccuracy) return
-  }
-
-  this.lastSentAt = now
-  this.lastSentCoords = { lat: latitude, lon: longitude, accuracy }
-
-  try {
-    const r = await fetch('/api/ubicacion-live', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        alias: this.userAlias,
-        lat: latitude,
-        lon: longitude,
-        precision: accuracy,
-        ts
-      })
-    })
-
-    // Fallback: si no estaba registrado aún, lo registramos
-    if (!r.ok) {
-      await fetch('/api/jugador', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          alias: this.userAlias,
-          lat: latitude,
-          lon: longitude
-        })
-      })
+      // ✅ enviar por WS
+      this.live.sendLocation({ lat: latitude, lon: longitude, precision: accuracy })
     }
-  } catch (e) {
-    console.warn('Error enviando ubicación:', e)
-  }
-},
-
-
-    onGeoError(err) {
-      console.warn('Error geolocalización:', err)
-    }
-  },
-
-  beforeUnmount() {
-    this.stopEstadoJuegoPolling()
-    this.stopLiveLocation()
   }
 }
 </script>

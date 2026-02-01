@@ -50,6 +50,8 @@
 </template>
 
 <script>
+import { LiveWS } from '../services/liveWS'
+
 export default {
   name: 'LoginView',
   emits: ['login-success', 'admin-login'],
@@ -69,17 +71,8 @@ export default {
       ],
       coloresOcupados: [],
 
-
-      picked: false
-    }
-  },
-
-  async mounted() {
-    try {
-      const res = await fetch('/api/colores')
-      this.coloresOcupados = await res.json()
-    } catch {
-      // 
+      picked: false,
+      live: null
     }
   },
 
@@ -90,21 +83,48 @@ export default {
     }
   },
 
+  mounted() {
+    // Conexión ligera para recibir occupancy
+    this.live = new LiveWS()
+    this.live.onMessage = (msg) => {
+      if (msg?.type === 'occupancy' && Array.isArray(msg.aliases)) {
+        this.coloresOcupados = msg.aliases
+      }
+      if (msg?.type === 'reset') {
+        this.coloresOcupados = []
+        this.picked = false
+      }
+    }
+    this.live.connect({ role: 'player' })
+  },
+
+  beforeUnmount() {
+    this.live?.disconnect()
+  },
+
   methods: {
     onPickColor(color) {
       if (this.picked) return
       this.picked = true
+      this.error = null
+
+      // si en ese microsegundo se ocupó, evita elegirlo
+      if (this.coloresOcupados.includes(color)) {
+        this.error = 'Color ocupado, elige otro'
+        this.picked = false
+        return
+      }
 
       this.$emit('login-success', { color })
-
-      this.coloresOcupados.push(color)
     },
 
     adminLogin() {
+      this.adminError = null
       if (this.adminPassword !== 'admin123') {
         this.adminError = 'Contraseña incorrecta'
         return
       }
+      this.showAdmin = false
       this.$emit('admin-login')
     }
   }
@@ -147,8 +167,6 @@ export default {
   border-radius: 50%;
   border: none;
   cursor: pointer;
-
-  /* ✅ móvil */
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
