@@ -88,8 +88,17 @@ async function startStream() {
 
     localStream = await navigator.mediaDevices.getUserMedia({
       video: selectedCameraId.value
-        ? { deviceId: { exact: selectedCameraId.value } }
-        : true,
+        ? {
+            deviceId: { exact: selectedCameraId.value },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 30 }
+          }
+        : {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 30 }
+          },
       audio: false
     });
 
@@ -104,7 +113,11 @@ async function startStream() {
 
     await waitForIceGathering(pc);
 
-    const response = await fetch("/api/offer", {
+    const offerUrl = (process.env.VUE_APP_WEBRTC_TARGET
+      ? `${process.env.VUE_APP_WEBRTC_TARGET.replace(/\/$/, "")}/offer`
+      : "/webrtc/offer")
+
+    const response = await fetch(offerUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

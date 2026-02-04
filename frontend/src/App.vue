@@ -35,7 +35,11 @@ export default {
 
       live: null,
       watchId: null,
+      geoFallbackTimer: null,
+      wakeLock: null,
+      visibilityHandler: null,
 
+      gamePollTimer: null,
       lastSentAt: 0,
       lastSentCoords: null
     }
@@ -50,22 +54,33 @@ export default {
       // Reset global => volver a login y parar tracking
       if (msg.type === 'reset') {
         this.stopLiveLocation()
+        this.stopGamePolling()
         this.screen = 'login'
         this.userAlias = null
       }
 
       // Estado juego => si admin inicia, pasamos a webrtc desde sala espera
-      if (msg.type === 'game_state' && msg.juego_en_curso === true) {
+      if ((msg.type === 'game_state' && msg.juego_en_curso === true) || msg.type === 'start') {
         if (this.screen === 'waiting') {
+          this.stopGamePolling()
           this.screen = 'webrtc'
         }
       }
     }
   },
 
+  mounted() {
+    this.visibilityHandler = () => this.handleVisibilityChange()
+    document.addEventListener('visibilitychange', this.visibilityHandler)
+  },
+
   beforeUnmount() {
     this.stopLiveLocation()
     this.live?.disconnect()
+    if (this.visibilityHandler) {
+      document.removeEventListener('visibilitychange', this.visibilityHandler)
+      this.visibilityHandler = null
+    }
   },
 
   methods: {
@@ -79,11 +94,15 @@ export default {
 
       // tracking continuo (hasta reset)
       this.startLiveLocation()
+
+      // fallback: polling estado juego
+      this.startGamePolling()
     },
 
     handleAdminLogin() {
       this.screen = 'admin'
       this.stopLiveLocation()
+      this.stopGamePolling()
       this.userAlias = null
 
       // WS admin
@@ -106,6 +125,8 @@ export default {
       if (!('geolocation' in navigator)) return
       if (this.watchId != null) return
 
+      this.requestWakeLock()
+
       const options = {
         enableHighAccuracy: true,
         maximumAge: 0,
@@ -114,9 +135,15 @@ export default {
 
       this.watchId = navigator.geolocation.watchPosition(
         (pos) => this.onGeoSuccess(pos),
-        (err) => console.warn('Error geolocalización:', err),
+        (err) => this.onGeoError(err),
         options
       )
+
+      // Primer fix inmediato para que el admin vea el punto al elegir color
+      this.primeLocation()
+
+      // Fallback: si watch se duerme, reintenta con getCurrentPosition
+      this.startGeoFallbackPoll()
     },
 
     stopLiveLocation() {
@@ -124,11 +151,36 @@ export default {
         navigator.geolocation.clearWatch(this.watchId)
         this.watchId = null
       }
+      this.stopGeoFallbackPoll()
+      this.releaseWakeLock()
       this.lastSentAt = 0
       this.lastSentCoords = null
     },
 
-    onGeoSuccess(pos) {
+    startGamePolling() {
+      this.stopGamePolling()
+      this.gamePollTimer = setInterval(async () => {
+        if (this.screen !== 'waiting') return
+        try {
+          const res = await fetch('/api/estado-juego')
+          if (!res.ok) return
+          const data = await res.json()
+          if (data?.juego_en_curso === true) {
+            this.stopGamePolling()
+            this.screen = 'webrtc'
+          }
+        } catch (e) {
+          console.warn('Error consultando estado-juego:', e)
+        }
+      }, 2000)
+    },
+
+    stopGamePolling() {
+      if (this.gamePollTimer) clearInterval(this.gamePollTimer)
+      this.gamePollTimer = null
+    },
+
+    async onGeoSuccess(pos) {
       if (!this.userAlias) return
 
       const { latitude, longitude, accuracy } = pos.coords
@@ -158,7 +210,98 @@ export default {
       this.lastSentCoords = { lat: latitude, lon: longitude, accuracy }
 
       // ✅ enviar por WS
-      this.live.sendLocation({ lat: latitude, lon: longitude, precision: accuracy })
+      const sentWs = this.live.sendLocation({ lat: latitude, lon: longitude, precision: accuracy })
+
+      // Fallback HTTP solo si el WS no está disponible
+      if (!sentWs) {
+        await this.sendLocationHttp({ lat: latitude, lon: longitude, precision: accuracy, ts: now })
+      }
+    },
+
+    onGeoError(err) {
+      console.warn('Error geolocalización:', err)
+      // reintento suave si el watch se duerme
+      if (err && (err.code === 2 || err.code === 3)) {
+        this.restartWatchSoon()
+      }
+    },
+
+    restartWatchSoon() {
+      if (this.watchId != null) {
+        navigator.geolocation.clearWatch(this.watchId)
+        this.watchId = null
+      }
+      setTimeout(() => this.startLiveLocation(), 2000)
+    },
+
+    primeLocation() {
+      if (!this.userAlias || !('geolocation' in navigator)) return
+      navigator.geolocation.getCurrentPosition(
+        (pos) => this.onGeoSuccess(pos),
+        (err) => this.onGeoError(err),
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+      )
+    },
+
+    startGeoFallbackPoll() {
+      this.stopGeoFallbackPoll()
+      this.geoFallbackTimer = setInterval(() => {
+        if (!this.userAlias) return
+        this.primeLocation()
+      }, 5000)
+    },
+
+    stopGeoFallbackPoll() {
+      if (this.geoFallbackTimer) clearInterval(this.geoFallbackTimer)
+      this.geoFallbackTimer = null
+    },
+
+    handleVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        // al volver a primer plano reanudamos tracking
+        if (this.userAlias) this.startLiveLocation()
+      }
+    },
+
+    async requestWakeLock() {
+      try {
+        if ('wakeLock' in navigator && !this.wakeLock) {
+          this.wakeLock = await navigator.wakeLock.request('screen')
+          this.wakeLock.addEventListener('release', () => {
+            this.wakeLock = null
+          })
+        }
+      } catch (e) {
+        console.warn('WakeLock no disponible:', e)
+      }
+    },
+
+    async releaseWakeLock() {
+      try {
+        await this.wakeLock?.release()
+      } catch (e) {
+        // ignore
+      } finally {
+        this.wakeLock = null
+      }
+    },
+
+    async sendLocationHttp({ lat, lon, precision, ts }) {
+      try {
+        await fetch('/api/ubicacion-live', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            alias: this.userAlias,
+            lat,
+            lon,
+            precision,
+            ts
+          })
+        })
+      } catch (e) {
+        console.warn('Error enviando ubicación HTTP:', e)
+      }
     }
   }
 }

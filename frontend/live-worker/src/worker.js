@@ -7,6 +7,7 @@ const cors = {
 };
 
 function withCors(resp) {
+  // ⚠️ NO usar para status 101 (websocket)
   const headers = new Headers(resp.headers);
   for (const [k, v] of Object.entries(cors)) headers.set(k, v);
   return new Response(resp.body, { status: resp.status, headers });
@@ -26,7 +27,17 @@ export default {
     const id = env.PARTY.idFromName(game);
     const stub = env.PARTY.get(id);
 
+    // 🔥 Llamada al DO
     const resp = await stub.fetch(request);
+
+    // ✅ Si es websocket upgrade o ruta /ws => NO envolver
+    // - el DO devolverá 101 cuando haga upgrade
+    // - envolverlo rompe y da RangeError
+    if (url.pathname === "/ws" || resp.status === 101) {
+      return resp;
+    }
+
+    // ✅ HTTP normal => sí le metemos CORS
     return withCors(resp);
   },
 };

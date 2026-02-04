@@ -1,8 +1,9 @@
 import cv2
 import time
-import mediapipe as mp
 from aiohttp import web
 import aiohttp_cors
+from ultralytics import YOLO
+# import mediapipe as mp
 
 from aiortc import (
     RTCPeerConnection,
@@ -14,25 +15,29 @@ from aiortc import (
 from av import VideoFrame
 
 # ===============================
-# MediaPipe (GLOBAL)
+# MediaPipe (GLOBAL) - reservado para uso futuro
 # ===============================
-mp_face_mesh = mp.solutions.face_mesh
-mp_drawing = mp.solutions.drawing_utils
+# mp_face_mesh = mp.solutions.face_mesh
+# mp_drawing = mp.solutions.drawing_utils
+#
+# face_mesh = mp_face_mesh.FaceMesh(
+#     static_image_mode=False,
+#     max_num_faces=1,
+#     refine_landmarks=True,
+#     min_detection_confidence=0.5,
+#     min_tracking_confidence=0.5
+# )
+#
+# soft_green = mp_drawing.DrawingSpec(
+#     color=(0, 255, 0),
+#     thickness=1,
+#     circle_radius=1
+# )
 
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=False,
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
-
-# Drawing spec suave
-soft_green = mp_drawing.DrawingSpec(
-    color=(0, 255, 0),
-    thickness=1,
-    circle_radius=1
-)
+# ===============================
+# YOLO (GLOBAL) - COCO "person" = class 0
+# ===============================
+model = YOLO("yolov8n.pt")
 
 pcs = set()
 
@@ -45,8 +50,9 @@ class ProcessedVideoTrack(VideoStreamTrack):
         super().__init__()
         self.source = source
         self.last_process_time = 0
-        self.process_interval = 1 / 12  # 12 FPS
-        self.last_landmarks = None     # 🔑 persistencia
+        self.process_interval = 1 / 24  # 24 FPS (equilibrado)
+        self.last_boxes = None        # 🔑 persistencia
+        # self.last_landmarks = None  # 🔑 reservado para MediaPipe
 
     async def recv(self):
         frame = await self.source.recv()
@@ -65,52 +71,70 @@ class ProcessedVideoTrack(VideoStreamTrack):
 
         if do_process:
             self.last_process_time = now
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(img_rgb)
-            if results.multi_face_landmarks:
-                self.last_landmarks = results.multi_face_landmarks
+            results = model.predict(
+                img,
+                imgsz=640,
+                conf=0.25,
+                classes=[0],  # person
+                verbose=False
+            )
+            if results and len(results) > 0:
+                self.last_boxes = results[0].boxes
+            # img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            # results = face_mesh.process(img_rgb)
+            # if results.multi_face_landmarks:
+            #     self.last_landmarks = results.multi_face_landmarks
 
         # ===============================
-        # Dibujado con transparencia
+        # Dibujado de cajas
         # ===============================
-        if self.last_landmarks:
-            overlay = img.copy()
-
-            for face_landmarks in self.last_landmarks:
-
-                # OJO IZQUIERDO
-                mp_drawing.draw_landmarks(
-                    image=overlay,
-                    landmark_list=face_landmarks,
-                    connections=mp_face_mesh.FACEMESH_LEFT_EYE,
-                    landmark_drawing_spec=soft_green,
-                    connection_drawing_spec=soft_green
+        if self.last_boxes is not None:
+            for box in self.last_boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                conf = float(box.conf[0]) if box.conf is not None else 0.0
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    img,
+                    f"person {conf:.2f}",
+                    (x1, max(0, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
                 )
-
-                # OJO DERECHO
-                mp_drawing.draw_landmarks(
-                    image=overlay,
-                    landmark_list=face_landmarks,
-                    connections=mp_face_mesh.FACEMESH_RIGHT_EYE,
-                    landmark_drawing_spec=soft_green,
-                    connection_drawing_spec=soft_green
-                )
-
-                # BOCA
-                mp_drawing.draw_landmarks(
-                    image=overlay,
-                    landmark_list=face_landmarks,
-                    connections=mp_face_mesh.FACEMESH_LIPS,
-                    landmark_drawing_spec=soft_green,
-                    connection_drawing_spec=soft_green
-                )
-
-            # 🔑 alpha para “transparencia”
-            img = cv2.addWeighted(overlay, 0.4, img, 0.6, 0)
+        # if self.last_landmarks:
+        #     overlay = img.copy()
+        #
+        #     for face_landmarks in self.last_landmarks:
+        #         mp_drawing.draw_landmarks(
+        #             image=overlay,
+        #             landmark_list=face_landmarks,
+        #             connections=mp_face_mesh.FACEMESH_LEFT_EYE,
+        #             landmark_drawing_spec=soft_green,
+        #             connection_drawing_spec=soft_green
+        #         )
+        #
+        #         mp_drawing.draw_landmarks(
+        #             image=overlay,
+        #             landmark_list=face_landmarks,
+        #             connections=mp_face_mesh.FACEMESH_RIGHT_EYE,
+        #             landmark_drawing_spec=soft_green,
+        #             connection_drawing_spec=soft_green
+        #         )
+        #
+        #         mp_drawing.draw_landmarks(
+        #             image=overlay,
+        #             landmark_list=face_landmarks,
+        #             connections=mp_face_mesh.FACEMESH_LIPS,
+        #             landmark_drawing_spec=soft_green,
+        #             connection_drawing_spec=soft_green
+        #         )
+        #
+        #     img = cv2.addWeighted(overlay, 0.4, img, 0.6, 0)
 
         cv2.putText(
             img,
-            "Low Latency Face Tracking",
+            "Person Detection (COCO)",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
@@ -147,7 +171,16 @@ async def offer(request):
     @pc.on("track")
     def on_track(track):
         if track.kind == "video":
-            pc.addTrack(ProcessedVideoTrack(track))
+            sender = pc.addTrack(ProcessedVideoTrack(track))
+            try:
+                params = sender.getParameters()
+                if not params.encodings:
+                    params.encodings = [{}]
+                params.encodings[0]["maxBitrate"] = 2_500_000  # 2.5 Mbps
+                params.encodings[0]["maxFramerate"] = 30
+                sender.setParameters(params)
+            except Exception as e:
+                print("⚠️ No se pudo ajustar bitrate:", e)
 
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
@@ -165,7 +198,7 @@ async def cleanup(app):
     for pc in pcs:
         await pc.close()
     pcs.clear()
-    face_mesh.close()
+    # face_mesh.close()
 
 # ===============================
 # App

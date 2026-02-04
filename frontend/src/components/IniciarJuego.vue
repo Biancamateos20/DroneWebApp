@@ -39,17 +39,21 @@ export default {
       layerEsri: null,
       layerPnoaProvWms: null,
 
-      live: null
+      live: null,
+      wsReady: false,
+      pollTimer: null
     }
   },
 
   mounted() {
     this.initMap()
     this.initWS()
+    this.startPollingFallback()
   },
 
   beforeUnmount() {
     this.live?.disconnect()
+    this.stopPollingFallback()
     if (this.map) {
       this.map.remove()
       this.map = null
@@ -74,6 +78,14 @@ export default {
         if (msg.type === 'reset') {
           this.clearMarkers()
         }
+      }
+
+      this.live.onOpen = () => {
+        this.wsReady = true
+      }
+
+      this.live.onClose = () => {
+        this.wsReady = false
       }
 
       this.live.connect({ role: 'admin' })
@@ -201,15 +213,43 @@ export default {
       this.markers = {}
     },
 
+    startPollingFallback() {
+      this.stopPollingFallback()
+      this.pollTimer = setInterval(async () => {
+        // si el WS está activo, no hace falta poll
+        if (this.live?.enabled && this.wsReady) return
+        try {
+          const url = this.getPlayersUrl()
+          if (!url) return
+          const res = await fetch(url)
+          if (!res.ok) return
+          const players = await res.json()
+          if (Array.isArray(players)) {
+            players.forEach(p => this.upsertPlayer(p))
+          }
+        } catch (e) {
+          console.warn('Error polling jugadores:', e)
+        }
+      }, 2000)
+    },
+
+    stopPollingFallback() {
+      if (this.pollTimer) clearInterval(this.pollTimer)
+      this.pollTimer = null
+    },
+
+    getPlayersUrl() {
+      const base = (process.env.VUE_APP_LIVE_URL || '').trim().replace(/\/$/, '')
+      if (base) return `${base}/jugadores`
+      return '/api/jugadores'
+    },
+
     async iniciarJuego() {
       this.error = null
       this.loading = true
       try {
-        // Si tienes un backend real para misión, lo llamas aquí.
-        // En Pages puro, /api/iniciar-juego no existe salvo que lo implementes como Function.
-        // Si ahora mismo NO tienes backend público, comenta estas dos líneas:
-        // const res = await fetch('/api/iniciar-juego', { method: 'POST' })
-        // if (!res.ok) throw new Error('Error al iniciar juego')
+        // Señal al backend (estado-juego) si existe:
+        await fetch('/api/iniciar-juego', { method: 'POST' }).catch(() => {})
 
         // ✅ Esto sí es lo importante para la app:
         this.live.startGame()

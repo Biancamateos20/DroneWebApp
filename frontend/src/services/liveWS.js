@@ -29,6 +29,7 @@ export class LiveWS {
 
     this.ws = null
     this.role = 'player'
+    this.isOpen = false
 
     this.onMessage = () => {}
     this.onOpen = () => {}
@@ -73,6 +74,7 @@ export class LiveWS {
 
     this.ws.onopen = () => {
       this.backoff = 400
+      this.isOpen = true
       this.send({
         type: 'join',
         role: this.role,
@@ -91,6 +93,7 @@ export class LiveWS {
 
     this.ws.onclose = () => {
       this._stopPing()
+      this.isOpen = false
       this.onClose()
       this._reconnect()
     }
@@ -122,12 +125,14 @@ export class LiveWS {
     try {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify(obj))
+        return true
       }
     } catch(e) {console.warn(e)}
+    return false
   }
 
   sendLocation({ lat, lon, precision }) {
-    this.send({
+    return this.send({
       type: 'loc',
       alias: this.session.alias,
       lat,
