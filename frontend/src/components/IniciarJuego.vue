@@ -10,13 +10,24 @@
         ▶ Iniciar juego
       </button>
 
+      <button class="btn photo" @click="hacerFotoYLand" :disabled="photoLoading">
+        📸 Foto + Land
+      </button>
+
       <button class="btn stop" @click="pararJuego">
         ■ Parar juego
       </button>
     </div>
 
     <p v-if="loading" class="subtitle">Lanzando misión…</p>
+    <p v-if="photoLoading" class="subtitle">Capturando foto…</p>
     <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="photoError" class="error">{{ photoError }}</p>
+
+    <div v-if="photoUrl" class="photo-panel">
+      <h3>Última foto</h3>
+      <img :src="photoUrl" alt="Foto dron" />
+    </div>
   </div>
 </template>
 
@@ -41,7 +52,11 @@ export default {
 
       live: null,
       wsReady: false,
-      pollTimer: null
+      pollTimer: null,
+
+      photoUrl: null,
+      photoLoading: false,
+      photoError: null
     }
   },
 
@@ -52,6 +67,7 @@ export default {
   },
 
   beforeUnmount() {
+    if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
     this.live?.disconnect()
     this.stopPollingFallback()
     if (this.map) {
@@ -263,14 +279,30 @@ export default {
     async pararJuego() {
       this.error = null
       try {
-        // Igual: si existe endpoint público para reset real, lo llamas aquí.
-        // await fetch('/api/reset', { method: 'POST' }).catch(() => {})
+        // Reset real en backend/VM
+        await fetch('/api/reset', { method: 'POST' }).catch(() => {})
 
         // ✅ Reset global del live:
         this.live.reset()
         this.clearMarkers()
       } catch {
         this.error = 'Error al parar el juego'
+      }
+    },
+
+    async hacerFotoYLand() {
+      this.photoError = null
+      this.photoLoading = true
+      try {
+        const res = await fetch('/api/foto-y-land', { method: 'POST' })
+        if (!res.ok) throw new Error('Error capturando foto')
+        const blob = await res.blob()
+        if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
+        this.photoUrl = URL.createObjectURL(blob)
+      } catch (e) {
+        this.photoError = e.message || 'Error capturando foto'
+      } finally {
+        this.photoLoading = false
       }
     }
   }
@@ -338,7 +370,13 @@ export default {
   color: white;
 }
 
+.btn.photo {
+  background: linear-gradient(135deg, #ffd166, #f4a261);
+  color: #3a2a00;
+}
+
 .btn.start:hover:not(:disabled),
+.btn.photo:hover:not(:disabled),
 .btn.stop:hover {
   transform: translateY(-2px);
 }
@@ -347,5 +385,31 @@ export default {
   margin-top: 30px;
   color: #ff6b6b;
   font-weight: 600;
+}
+
+.photo-panel {
+  margin-top: 20px;
+  width: 80%;
+  max-width: 900px;
+  background: #0c0c0c;
+  border: 1px solid #222;
+  border-radius: 12px;
+  padding: 14px;
+  text-align: left;
+}
+
+.photo-panel h3 {
+  margin: 0 0 10px 0;
+  color: #ddd;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.photo-panel img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 8px;
+  border: 1px solid #111;
 }
 </style>

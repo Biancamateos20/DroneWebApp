@@ -20,3 +20,15 @@ services:
     volumes:
       - .:/workspace
     container_name: drone_frontend
+
+  imagen:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    working_dir: /workspace/backend/Gestos
+    command: python imagen.py
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/workspace
+    container_name: drone_imagen

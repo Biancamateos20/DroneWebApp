@@ -41,7 +41,10 @@ export default {
 
       gamePollTimer: null,
       lastSentAt: 0,
-      lastSentCoords: null
+      lastSentCoords: null,
+
+      lastStartId: null,
+      lastResetId: null
     }
   },
 
@@ -53,17 +56,18 @@ export default {
 
       // Reset global => volver a login y parar tracking
       if (msg.type === 'reset') {
-        this.stopLiveLocation()
-        this.stopGamePolling()
-        this.screen = 'login'
-        this.userAlias = null
+        this.handleReset()
       }
 
       // Estado juego => si admin inicia, pasamos a webrtc desde sala espera
       if ((msg.type === 'game_state' && msg.juego_en_curso === true) || msg.type === 'start') {
         if (this.screen === 'waiting') {
-          this.stopGamePolling()
-          this.screen = 'webrtc'
+          const startId = Number(msg.game_start_id ?? msg.start_id ?? 0)
+          if (this.shouldStartWithId(startId)) {
+            this.markStartSeen(startId)
+            this.stopGamePolling()
+            this.screen = 'webrtc'
+          }
         }
       }
     }
@@ -87,6 +91,12 @@ export default {
     handleLoginSuccess(data) {
       this.userAlias = data.color
       this.screen = 'waiting'
+
+      // Registrar jugador por HTTP (necesario si no hay WS)
+      this.registerPlayerHttp()
+
+      // 🔒 Evitar auto-start en refresh: tomar el estado actual como "visto"
+      this.syncGameStateOnJoin()
 
       // WS player
       this.live.setAlias(this.userAlias)
@@ -165,9 +175,19 @@ export default {
           const res = await fetch('/api/estado-juego')
           if (!res.ok) return
           const data = await res.json()
+          const resetId = Number(data.reset_id ?? 0)
+          if (this.shouldResetWithId(resetId)) {
+            this.markResetSeen(resetId)
+            this.handleReset()
+            return
+          }
           if (data?.juego_en_curso === true) {
-            this.stopGamePolling()
-            this.screen = 'webrtc'
+            const startId = Number(data.game_start_id ?? 0)
+            if (this.shouldStartWithId(startId)) {
+              this.markStartSeen(startId)
+              this.stopGamePolling()
+              this.screen = 'webrtc'
+            }
           }
         } catch (e) {
           console.warn('Error consultando estado-juego:', e)
@@ -301,6 +321,106 @@ export default {
         })
       } catch (e) {
         console.warn('Error enviando ubicación HTTP:', e)
+      }
+    },
+
+    registerPlayerHttp() {
+      if (!this.userAlias || !('geolocation' in navigator)) return
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const lat = Number(pos.coords.latitude)
+          const lon = Number(pos.coords.longitude)
+          if (Number.isNaN(lat) || Number.isNaN(lon)) return
+          try {
+            await fetch('/api/jugador', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                alias: this.userAlias,
+                lat,
+                lon
+              })
+            })
+          } catch (e) {
+            console.warn('Error registrando jugador HTTP:', e)
+          }
+        },
+        (err) => {
+          console.warn('Error obteniendo ubicación para registro:', err)
+        },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+      )
+    },
+
+    async syncGameStateOnJoin() {
+      try {
+        const res = await fetch('/api/estado-juego')
+        if (!res.ok) return
+        const data = await res.json()
+        const startId = Number(data.game_start_id ?? 0)
+        if (startId) {
+          this.markStartSeen(startId)
+        }
+        const resetId = Number(data.reset_id ?? 0)
+        if (resetId) {
+          this.markResetSeen(resetId)
+        }
+      } catch (e) {
+        console.warn('Error sincronizando estado juego:', e)
+      }
+    },
+
+    shouldStartWithId(startId) {
+      if (!startId) return false
+      const last = this.getLastStartSeen()
+      return last == null || startId > last
+    },
+
+    getLastStartSeen() {
+      if (this.lastStartId != null) return this.lastStartId
+      const raw = localStorage.getItem('last_start_id_v1')
+      const n = raw != null ? Number(raw) : null
+      this.lastStartId = Number.isFinite(n) ? n : null
+      return this.lastStartId
+    },
+
+    markStartSeen(startId) {
+      if (!startId) return
+      this.lastStartId = startId
+      localStorage.setItem('last_start_id_v1', String(startId))
+    },
+
+    shouldResetWithId(resetId) {
+      if (!resetId) return false
+      const last = this.getLastResetSeen()
+      return last == null || resetId > last
+    },
+
+    getLastResetSeen() {
+      if (this.lastResetId != null) return this.lastResetId
+      const raw = localStorage.getItem('last_reset_id_v1')
+      const n = raw != null ? Number(raw) : null
+      this.lastResetId = Number.isFinite(n) ? n : null
+      return this.lastResetId
+    },
+
+    markResetSeen(resetId) {
+      if (!resetId) return
+      this.lastResetId = resetId
+      localStorage.setItem('last_reset_id_v1', String(resetId))
+    },
+
+    handleReset() {
+      this.stopLiveLocation()
+      this.stopGamePolling()
+      this.screen = 'login'
+      this.userAlias = null
+      this.lastSentAt = 0
+      this.lastSentCoords = null
+      try {
+        localStorage.removeItem('player_session_v1')
+      } catch (e) {
+        // ignore
       }
     }
   }

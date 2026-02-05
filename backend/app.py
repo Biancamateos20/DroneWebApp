@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import requests
 from flask_cors import CORS
 
@@ -11,6 +11,11 @@ CORS(app)
 VM_IP = "192.168.64.2"
 VM_PORT = 5002
 VM_BASE_URL = f"http://{VM_IP}:{VM_PORT}"
+
+# ===============================
+# CONFIG IMAGEN (RTC)
+# ===============================
+IMAGE_BASE_URL = "http://imagen:8080"
 
 # ===============================
 # ESTADO LOCAL (PROXY)
@@ -86,24 +91,26 @@ def ubicacion_live():
     if lat is None or lon is None or alias is None:
         return jsonify({"error": "Datos incompletos"}), 400
 
-    # Si no está registrado, devolvemos error para que el frontend haga fallback a /jugador
+    # Si no está registrado, lo registramos automáticamente para robustez
     if alias not in colores_ocupados:
-        return jsonify({"error": "Jugador no registrado"}), 400
+        colores_ocupados.add(alias)
+        jugadores.append({"lat": lat, "lon": lon, "alias": alias})
+        print(f"Jugador auto-registrado → {alias} ({lat}, {lon})")
+    else:
+        # Actualiza posición del jugador en la lista
+        found = False
+        for j in jugadores:
+            if j.get("alias") == alias:
+                j["lat"] = lat
+                j["lon"] = lon
+                j["precision"] = precision
+                j["ts"] = ts
+                found = True
+                break
 
-    # Actualiza posición del jugador en la lista
-    found = False
-    for j in jugadores:
-        if j.get("alias") == alias:
-            j["lat"] = lat
-            j["lon"] = lon
-            j["precision"] = precision
-            j["ts"] = ts
-            found = True
-            break
-
-    if not found:
-        # Inconsistencia set/list
-        jugadores.append({"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts})
+        if not found:
+            # Inconsistencia set/list
+            jugadores.append({"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts})
 
     # Reenviar a la VM si tiene endpoint equivalente (opcional)
     try:
@@ -142,15 +149,21 @@ def iniciar_juego():
     global juego_en_curso
     print("Admin → iniciar juego")
 
-    juego_en_curso = True  # 🔑 estado local
-
     try:
-        resp = requests.post(f"{VM_BASE_URL}/iniciar-juego", timeout=3)
+        # 🔑 Estado local: permite que los clientes pasen a WebRTC
+        juego_en_curso = True
+
+        # Pasamos el snapshot de jugadores actuales (si la VM lo soporta).
+        resp = requests.post(
+            f"{VM_BASE_URL}/iniciar-juego",
+            json={"jugadores": jugadores},
+            timeout=3
+        )
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         print("❌ Error iniciar juego:", e)
-        juego_en_curso = False
-        return jsonify({"error": "Error iniciando juego"}), 500
+        # mantenemos juego_en_curso = True para que la UI avance
+        return jsonify({"error": "Error iniciando juego en VM", "warning": True}), 500
 
 
 # ===============================
@@ -172,6 +185,53 @@ def reset():
         print("⚠️ No se pudo resetear VM (continuo igual):", e)
 
     return jsonify({"status": "reset ok", "reset_id": reset_id}), 200
+
+
+# ===============================
+# ADMIN → FOTO (+ LAND)
+# ===============================
+def _fetch_image_from_rtc(timeout_s: int = 12):
+    """
+    Proxy sencillo para imagen desde el servicio RTC (imagen.py).
+    Espera una imagen en /snapshot.
+    """
+    url = f"{IMAGE_BASE_URL}/snapshot"
+    resp = requests.get(url, timeout=timeout_s)
+
+    if not resp.ok:
+        return jsonify({"error": "Error en servicio RTC"}), resp.status_code
+
+    ct = (resp.headers.get("Content-Type") or "").lower()
+    if ct.startswith("image/"):
+        return Response(
+            resp.content,
+            status=resp.status_code,
+            headers={
+                "Content-Type": ct,
+                "Cache-Control": "no-store"
+            }
+        )
+
+    return jsonify({"error": "Formato de imagen no soportado"}), 500
+
+
+@app.route("/foto", methods=["POST"])
+def foto():
+    return _fetch_image_from_rtc()
+
+
+@app.route("/foto-y-land", methods=["POST"])
+def foto_y_land():
+    # 1) Captura foto desde RTC
+    img_resp = _fetch_image_from_rtc()
+
+    # 2) Intento de land en la VM (best-effort)
+    try:
+        requests.post(f"{VM_BASE_URL}/land", timeout=3)
+    except Exception as e:
+        print("⚠️ Error enviando LAND a la VM:", e)
+
+    return img_resp
 
 
 

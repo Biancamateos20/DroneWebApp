@@ -4,6 +4,7 @@ from aiohttp import web
 import aiohttp_cors
 from ultralytics import YOLO
 # import mediapipe as mp
+import asyncio
 
 from aiortc import (
     RTCPeerConnection,
@@ -40,6 +41,10 @@ from av import VideoFrame
 model = YOLO("yolov8n.pt")
 
 pcs = set()
+latest_jpeg = None
+latest_ts = 0.0
+latest_lock = asyncio.Lock()
+snapshot_interval = 0.4  # seconds
 
 # ===============================
 # Video Track Optimizado
@@ -142,6 +147,16 @@ class ProcessedVideoTrack(VideoStreamTrack):
             2
         )
 
+        # Guarda un snapshot JPEG cada cierto tiempo para /snapshot
+        global latest_jpeg, latest_ts
+        now2 = time.time()
+        if now2 - latest_ts > snapshot_interval:
+            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if ok:
+                async with latest_lock:
+                    latest_jpeg = buf.tobytes()
+                    latest_ts = now2
+
         new_frame = VideoFrame.from_ndarray(img, format="bgr24")
         pts, time_base = await self.next_timestamp()
         new_frame.pts = pts
@@ -192,6 +207,15 @@ async def offer(request):
     })
 
 # ===============================
+# Snapshot
+# ===============================
+async def snapshot(request):
+    async with latest_lock:
+        if latest_jpeg is None:
+            return web.json_response({"error": "No hay frames aún"}, status=503)
+        return web.Response(body=latest_jpeg, content_type="image/jpeg")
+
+# ===============================
 # Cleanup
 # ===============================
 async def cleanup(app):
@@ -205,6 +229,7 @@ async def cleanup(app):
 # ===============================
 app = web.Application()
 app.router.add_post("/offer", offer)
+app.router.add_get("/snapshot", snapshot)
 app.on_shutdown.append(cleanup)
 
 cors = aiohttp_cors.setup(app, defaults={
