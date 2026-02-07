@@ -5,24 +5,75 @@
 
     <div id="map" class="map"></div>
 
-    <div class="buttons">
-      <button class="btn start" @click="iniciarJuego" :disabled="loading">
-        ▶ Iniciar juego
-      </button>
+    <div class="control-grid">
+      <section class="panel">
+        <h3>Operación</h3>
+        <p class="panel-sub">Gestión de la partida y misión</p>
 
-      <button class="btn photo" @click="hacerFotoYLand" :disabled="photoLoading">
-        📸 Foto + Land
-      </button>
+        <div class="panel-actions">
+          <button class="btn start" @click="iniciarJuego" :disabled="loading">
+            ▶ Iniciar juego
+          </button>
 
-      <button class="btn stop" @click="pararJuego">
-        ■ Parar juego
-      </button>
+          <button class="btn stop" @click="pararJuego">
+            ■ Parar juego
+          </button>
+        </div>
+      </section>
+
+      <section class="panel lab">
+        <h3>Laboratorio</h3>
+        <p class="panel-sub">Pruebas rápidas de dron y geolocalización</p>
+
+        <div class="row">
+          <label class="field">
+            <span>Modo</span>
+            <select v-model="droneMode">
+              <option value="sim">Simulación</option>
+              <option value="real">Real</option>
+            </select>
+          </label>
+
+          <div class="status">
+            <span class="dot" :class="{ on: droneConnected }"></span>
+            {{ droneConnected ? 'Dron conectado' : 'Dron desconectado' }}
+          </div>
+        </div>
+
+        <div class="panel-actions">
+          <button class="btn neutral" @click="connectDrone" :disabled="connectLoading">
+            {{ droneConnected ? 'Desconectar' : 'Conectar dron' }}
+          </button>
+
+          <button class="btn info" @click="checkGpsPrecision" :disabled="gpsLoading">
+            📍 Ver precisión GPS
+          </button>
+
+          <button class="btn photo" @click="hacerFoto" :disabled="photoLoading">
+            📸 Foto
+          </button>
+
+          <button class="btn danger" @click="landOnly" :disabled="landLoading">
+            ⬇ Land
+          </button>
+        </div>
+
+        <div class="gps-box" v-if="gpsAccuracy != null">
+          Precisión actual: <strong>{{ gpsAccuracy }} m</strong>
+          <span v-if="gpsTimestamp">· {{ gpsTimestamp }}</span>
+        </div>
+      </section>
     </div>
 
     <p v-if="loading" class="subtitle">Lanzando misión…</p>
     <p v-if="photoLoading" class="subtitle">Capturando foto…</p>
+    <p v-if="landLoading" class="subtitle">Enviando LAND…</p>
+    <p v-if="connectLoading" class="subtitle">Conectando dron…</p>
+    <p v-if="gpsLoading" class="subtitle">Consultando precisión…</p>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="photoError" class="error">{{ photoError }}</p>
+    <p v-if="landError" class="error">{{ landError }}</p>
+    <p v-if="gpsError" class="error">{{ gpsError }}</p>
 
     <div v-if="photoUrl" class="photo-panel">
       <h3>Última foto</h3>
@@ -56,7 +107,18 @@ export default {
 
       photoUrl: null,
       photoLoading: false,
-      photoError: null
+      photoError: null,
+      landLoading: false,
+      landError: null,
+
+      droneMode: 'sim',
+      droneConnected: false,
+      connectLoading: false,
+
+      gpsAccuracy: null,
+      gpsTimestamp: null,
+      gpsLoading: false,
+      gpsError: null
     }
   },
 
@@ -314,11 +376,11 @@ export default {
       }
     },
 
-    async hacerFotoYLand() {
+    async hacerFoto() {
       this.photoError = null
       this.photoLoading = true
       try {
-        const res = await fetch('/api/foto-y-land', { method: 'POST' })
+        const res = await fetch('/api/foto', { method: 'POST' })
         if (!res.ok) throw new Error('Error capturando foto')
         const blob = await res.blob()
         if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
@@ -328,6 +390,67 @@ export default {
       } finally {
         this.photoLoading = false
       }
+    },
+
+    async landOnly() {
+      this.landError = null
+      this.landLoading = true
+      try {
+        const res = await fetch('/api/land', { method: 'POST' })
+        if (!res.ok) throw new Error('Error enviando LAND')
+      } catch (e) {
+        this.landError = e.message || 'Error enviando LAND'
+      } finally {
+        this.landLoading = false
+      }
+    },
+
+    async connectDrone() {
+      this.error = null
+      this.connectLoading = true
+      try {
+        const action = this.droneConnected ? 'disconnect' : 'connect'
+        const res = await fetch('/api/connection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: this.droneMode, action })
+        })
+        if (!res.ok) throw new Error('Error conectando dron')
+        const data = await res.json().catch(() => ({}))
+        if (typeof data.connected === 'boolean') {
+          this.droneConnected = data.connected
+        } else {
+          this.droneConnected = !this.droneConnected
+        }
+      } catch (e) {
+        this.error = e.message || 'Error conectando dron'
+      } finally {
+        this.connectLoading = false
+      }
+    },
+
+    checkGpsPrecision() {
+      this.gpsError = null
+      this.gpsLoading = true
+      if (!navigator.geolocation) {
+        this.gpsError = 'Geolocalización no disponible en este navegador'
+        this.gpsLoading = false
+        return
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const acc = Number(pos.coords.accuracy)
+          this.gpsAccuracy = Number.isFinite(acc) ? Math.round(acc) : null
+          this.gpsTimestamp = new Date(pos.timestamp).toLocaleTimeString()
+          this.gpsLoading = false
+        },
+        (err) => {
+          this.gpsError = err?.message || 'No se pudo leer la precisión'
+          this.gpsLoading = false
+        },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+      )
     }
   }
 }
@@ -367,9 +490,84 @@ export default {
   box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
 }
 
-.buttons {
+.control-grid {
+  width: 80%;
+  max-width: 900px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
+}
+
+.panel {
+  background: linear-gradient(180deg, #0f0f0f 0%, #0a0a0a 100%);
+  border: 1px solid #1d1d1d;
+  border-radius: 14px;
+  padding: 18px;
+  text-align: left;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.panel h3 {
+  margin: 0 0 6px 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.panel-sub {
+  margin: 0 0 16px 0;
+  color: #9b9b9b;
+  font-size: 0.9rem;
+}
+
+.panel-actions {
   display: flex;
-  gap: 40px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: #bdbdbd;
+}
+
+.field select {
+  background: #111;
+  color: white;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: #cfcfcf;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #5b5b5b;
+  box-shadow: 0 0 0 3px rgba(91, 91, 91, 0.2);
+}
+
+.dot.on {
+  background: #00ff88;
+  box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.2);
 }
 
 .btn {
@@ -399,9 +597,30 @@ export default {
   color: #3a2a00;
 }
 
+.btn.neutral {
+  background: linear-gradient(135deg, #4b5563, #1f2937);
+  color: #f1f5f9;
+}
+
+.btn.info {
+  background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+  color: #00263a;
+}
+
+.btn.danger {
+  background: linear-gradient(135deg, #ff4d4d, #d63031);
+  color: white;
+}
+
 .btn.start:hover:not(:disabled),
 .btn.photo:hover:not(:disabled),
 .btn.stop:hover {
+  transform: translateY(-2px);
+}
+
+.btn.neutral:hover:not(:disabled),
+.btn.info:hover:not(:disabled),
+.btn.danger:hover:not(:disabled) {
   transform: translateY(-2px);
 }
 
@@ -409,6 +628,16 @@ export default {
   margin-top: 30px;
   color: #ff6b6b;
   font-weight: 600;
+}
+
+.gps-box {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #0b1117;
+  border: 1px solid #1e293b;
+  font-size: 0.9rem;
+  color: #cbd5f5;
 }
 
 .photo-panel {

@@ -192,6 +192,16 @@ def foto():
     # Devuelve una foto actual desde el servicio RTC.
     return _fetch_image_from_rtc()
 
+@app.route("/land", methods=["POST"])
+def land():
+    # Envia la orden de aterrizaje a la VM.
+    try:
+        resp = requests.post(f"{VM_BASE_URL}/land", timeout=3)
+        return jsonify({"status": "ok", "vm_status": resp.status_code}), 200
+    except Exception as e:
+        print("⚠️ Error enviando LAND a la VM:", e)
+        return jsonify({"error": "Error enviando LAND a la VM"}), 502
+
 
 @app.route("/foto-y-land", methods=["POST"])
 def foto_y_land():
@@ -223,6 +233,23 @@ def estado_juego():
         "game_start_id": game_start_id
     }), 200
 
+@app.route("/connection", methods=["POST"])
+def connection():
+    # Proxy al endpoint real de la VM para conectar el dron.
+    try:
+        resp = requests.post(f"{VM_BASE_URL}/connection", timeout=3)
+        if not resp.ok:
+            return jsonify({"ok": False, "error": "Error en VM", "vm_status": resp.status_code}), 502
+        data = {}
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        connected = bool(data.get("connected", True))
+        return jsonify({"ok": True, "connected": connected}), 200
+    except Exception as e:
+        print("⚠️ Error conectando dron a la VM:", e)
+        return jsonify({"ok": False, "error": "Error comunicando con la VM"}), 502
 
 if __name__ == "__main__":
     print("Servidor Flask proxy en http://127.0.0.1:5001")
