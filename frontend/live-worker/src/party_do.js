@@ -7,7 +7,7 @@ export class PartyDO {
     this.connMeta = new Map();  // connId -> { role, alias, playerId }
 
     this.players = new Map();   // alias -> {alias, lat, lon, precision, ts, ...}
-    this.gameState = { juego_en_curso: false, reset_id: 0 };
+    this.gameState = { juego_en_curso: false, reset_id: 0, game_start_id: 0 };
 
     this.pendingPersist = false;
 
@@ -22,6 +22,7 @@ export class PartyDO {
         this.gameState = {
           juego_en_curso: !!storedState.juego_en_curso,
           reset_id: Number(storedState.reset_id ?? 0),
+          game_start_id: Number(storedState.game_start_id ?? 0),
         };
       }
     });
@@ -138,6 +139,7 @@ export class PartyDO {
     if (!meta || meta.role !== "admin") return;
 
     this.gameState.juego_en_curso = true;
+    this.gameState.game_start_id += 1;
     this.schedulePersist();
     this.broadcastAll({ type: "game_state", ...this.gameState });
   }

@@ -1,59 +1,50 @@
 from flask import Flask, request, jsonify, Response
 import requests
 from flask_cors import CORS
+import os
 
 app = Flask(__name__)
 CORS(app)
 
-# ===============================
-# CONFIG VM
-# ===============================
 VM_IP = "192.168.64.2"
 VM_PORT = 5002
 VM_BASE_URL = f"http://{VM_IP}:{VM_PORT}"
 
-# ===============================
-# CONFIG IMAGEN (RTC)
-# ===============================
-IMAGE_BASE_URL = "http://imagen:8080"
+IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "http://127.0.0.1:8080")
 
-# ===============================
-# ESTADO LOCAL (PROXY)
-# ===============================
 colores_ocupados = set()
 juego_en_curso = False
 
-# Guardamos jugadores para que el panel admin pueda pintarlos en el mapa
-# Cada item: {"lat": float, "lon": float, "alias": str (hex color)}
 jugadores = []
+game_start_id = 0
 reset_id = 0
 
 
-# ===============================
-# JUGADOR → REGISTRO
-# ===============================
+@app.route("/Hello", methods=['GET'])
+def hola():
+    # comprobar el servicio.
+    print("Hola")
+    return "Hola"
+
 @app.route("/jugador", methods=["POST"])
 def registrar_jugador():
+    # Registra un jugador, valida datos y reenvia a la VM.
     data = request.get_json() or {}
 
     lat = data.get("lat")
     lon = data.get("lon")
     alias = data.get("alias")
 
-    # ✅ Validación robusta: 0.0 es válido, por eso usamos "is None"
     if lat is None or lon is None or alias is None:
         return jsonify({"error": "Datos incompletos"}), 400
 
-    # 🔒 bloquear color
     if alias in colores_ocupados:
         return jsonify({"error": "Color ya ocupado"}), 400
 
-    # Guardar estado local
     colores_ocupados.add(alias)
     jugadores.append({"lat": lat, "lon": lon, "alias": alias})
     print(f"Jugador registrado (proxy) → {alias} ({lat}, {lon})")
 
-    # reenviar a la VM
     try:
         requests.post(
             f"{VM_BASE_URL}/jugador",
@@ -61,9 +52,8 @@ def registrar_jugador():
             timeout=3
         )
     except Exception as e:
-        print("❌ Error comunicando con la VM:", e)
+        print("Error comunicando con la VM:", e)
 
-        # rollback local
         colores_ocupados.discard(alias)
         jugadores[:] = [j for j in jugadores if j.get("alias") != alias]
 
@@ -75,11 +65,9 @@ def registrar_jugador():
     }), 200
 
 
-# ===============================
-# UBICACIÓN EN DIRECTO (LIVE)
-# ===============================
 @app.route("/ubicacion-live", methods=["POST"])
 def ubicacion_live():
+    # Recibe ubicacion en tiempo real y actualiza el estado local.
     data = request.get_json() or {}
 
     lat = data.get("lat")
@@ -91,13 +79,11 @@ def ubicacion_live():
     if lat is None or lon is None or alias is None:
         return jsonify({"error": "Datos incompletos"}), 400
 
-    # Si no está registrado, lo registramos automáticamente para robustez
     if alias not in colores_ocupados:
         colores_ocupados.add(alias)
         jugadores.append({"lat": lat, "lon": lon, "alias": alias})
         print(f"Jugador auto-registrado → {alias} ({lat}, {lon})")
     else:
-        # Actualiza posición del jugador en la lista
         found = False
         for j in jugadores:
             if j.get("alias") == alias:
@@ -109,10 +95,8 @@ def ubicacion_live():
                 break
 
         if not found:
-            # Inconsistencia set/list
             jugadores.append({"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts})
 
-    # Reenviar a la VM si tiene endpoint equivalente (opcional)
     try:
         requests.post(
             f"{VM_BASE_URL}/ubicacion-live",
@@ -120,40 +104,33 @@ def ubicacion_live():
             timeout=2
         )
     except Exception as e:
-        print("⚠️ Error enviando ubicación live a la VM:", e)
+        print("Error enviando ubicación live a la VM:", e)
 
     return jsonify({"status": "ok"}), 200
 
 
-# ===============================
-# COLORES OCUPADOS
-# ===============================
 @app.route("/colores", methods=["GET"])
 def colores():
+    # Devuelve la lista de colores ya ocupados por jugadores.
     return jsonify(list(colores_ocupados)), 200
 
 
-# ===============================
-# JUGADORES (para el mapa del admin)
-# ===============================
 @app.route("/jugadores", methods=["GET"])
 def get_jugadores():
+    # Devuelve la lista de jugadores para el mapa del admin.
     return jsonify(jugadores), 200
 
 
-# ===============================
-# ADMIN → INICIAR JUEGO
-# ===============================
 @app.route("/iniciar-juego", methods=["POST"])
 def iniciar_juego():
-    global juego_en_curso
+    # Marca el inicio del juego y notifica a la VM.
+    global juego_en_curso, game_start_id
     print("Admin → iniciar juego")
 
     try:
-        # 🔑 Estado local: permite que los clientes pasen a WebRTC
         juego_en_curso = True
+        game_start_id += 1
 
-        # Pasamos el snapshot de jugadores actuales (si la VM lo soporta).
         resp = requests.post(
             f"{VM_BASE_URL}/iniciar-juego",
             json={"jugadores": jugadores},
@@ -162,15 +139,12 @@ def iniciar_juego():
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         print("❌ Error iniciar juego:", e)
-        # mantenemos juego_en_curso = True para que la UI avance
         return jsonify({"error": "Error iniciando juego en VM", "warning": True}), 500
 
 
-# ===============================
-# ADMIN → RESET
-# ===============================
 @app.route("/reset", methods=["POST"])
 def reset():
+    # Reinicia el estado local y solicita reset en la VM.
     global juego_en_curso, colores_ocupados, jugadores, reset_id
 
     colores_ocupados.clear()
@@ -187,16 +161,14 @@ def reset():
     return jsonify({"status": "reset ok", "reset_id": reset_id}), 200
 
 
-# ===============================
-# ADMIN → FOTO (+ LAND)
-# ===============================
 def _fetch_image_from_rtc(timeout_s: int = 12):
-    """
-    Proxy sencillo para imagen desde el servicio RTC (imagen.py).
-    Espera una imagen en /snapshot.
-    """
+    # Solicita una imagen al servicio RTC y la devuelve.
     url = f"{IMAGE_BASE_URL}/snapshot"
-    resp = requests.get(url, timeout=timeout_s)
+    try:
+        resp = requests.get(url, timeout=timeout_s)
+    except Exception as e:
+        print("Error conectando a RTC:", e)
+        return jsonify({"error": "No se pudo conectar al servicio RTC"}), 502
 
     if not resp.ok:
         return jsonify({"error": "Error en servicio RTC"}), resp.status_code
@@ -217,15 +189,15 @@ def _fetch_image_from_rtc(timeout_s: int = 12):
 
 @app.route("/foto", methods=["POST"])
 def foto():
+    # Devuelve una foto actual desde el servicio RTC.
     return _fetch_image_from_rtc()
 
 
 @app.route("/foto-y-land", methods=["POST"])
 def foto_y_land():
-    # 1) Captura foto desde RTC
+    # Captura una foto y envia la orden de aterrizaje a la VM.
     img_resp = _fetch_image_from_rtc()
 
-    # 2) Intento de land en la VM (best-effort)
     try:
         requests.post(f"{VM_BASE_URL}/land", timeout=3)
     except Exception as e:
@@ -234,12 +206,9 @@ def foto_y_land():
     return img_resp
 
 
-
-# ===============================
-# INFO WEBRTC
-# ===============================
 @app.route("/offer", methods=["POST"])
 def webrtc():
+    # Informa que la senalizacion WebRTC esta en otro servicio.
     return jsonify({
         "error": "WebRTC está en el servicio dedicado (puerto 8090)"
     }), 400
@@ -247,16 +216,14 @@ def webrtc():
 
 @app.route("/estado-juego", methods=["GET"])
 def estado_juego():
+    # Devuelve el estado actual del juego y contadores.
     return jsonify({
         "juego_en_curso": juego_en_curso,
-        "reset_id": reset_id
+        "reset_id": reset_id,
+        "game_start_id": game_start_id
     }), 200
 
 
-
-# ===============================
-# MAIN
-# ===============================
 if __name__ == "__main__":
     print("Servidor Flask proxy en http://127.0.0.1:5001")
     app.run(host="0.0.0.0", port=5001, debug=True)

@@ -237,14 +237,27 @@ export default {
         try {
           const url = this.getPlayersUrl()
           if (!url) return
-          const res = await fetch(url)
+          let res = await fetch(url)
+          if (!res.ok && url !== '/api/jugadores') {
+            // fallback al backend local si el live no responde
+            res = await fetch('/api/jugadores')
+          }
           if (!res.ok) return
           const players = await res.json()
           if (Array.isArray(players)) {
             players.forEach(p => this.upsertPlayer(p))
           }
         } catch (e) {
-          console.warn('Error polling jugadores:', e)
+          try {
+            const res = await fetch('/api/jugadores')
+            if (!res.ok) return
+            const players = await res.json()
+            if (Array.isArray(players)) {
+              players.forEach(p => this.upsertPlayer(p))
+            }
+          } catch (err) {
+            console.warn('Error polling jugadores:', err)
+          }
         }
       }, 2000)
     },
@@ -255,7 +268,20 @@ export default {
     },
 
     getPlayersUrl() {
-      const base = (process.env.VUE_APP_LIVE_URL || '').trim().replace(/\/$/, '')
+      if (!this.live?.enabled) return '/api/jugadores'
+      let base = (process.env.VUE_APP_LIVE_URL || '').trim().replace(/\/$/, '')
+      // Evitar mixed-content o localhost en producción
+      try {
+        const isHttpsPage = window.location.protocol === 'https:'
+        const isHttpBase = base.startsWith('http://')
+        const isLocalBase = /^(http:\/\/|https:\/\/)?(localhost|127\.0\.0\.1)/i.test(base)
+        const isLocalPage = /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
+        if ((isHttpsPage && isHttpBase) || (isLocalBase && !isLocalPage)) {
+          base = ''
+        }
+      } catch (e) {
+        // ignore
+      }
       if (base) return `${base}/jugadores`
       return '/api/jugadores'
     },
@@ -264,10 +290,8 @@ export default {
       this.error = null
       this.loading = true
       try {
-        // Señal al backend (estado-juego) si existe:
         await fetch('/api/iniciar-juego', { method: 'POST' }).catch(() => {})
 
-        // ✅ Esto sí es lo importante para la app:
         this.live.startGame()
       } catch (e) {
         this.error = e.message || 'Error al iniciar el juego'

@@ -1,6 +1,7 @@
 import speech_recognition as sr
 
 def escuchar_y_mostrar():
+    # Escucha el microfono y devuelve el texto reconocido.
     recognizer = sr.Recognizer()
 
     with sr.Microphone() as source:

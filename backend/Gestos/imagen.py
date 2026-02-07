@@ -3,7 +3,6 @@ import time
 from aiohttp import web
 import aiohttp_cors
 from ultralytics import YOLO
-# import mediapipe as mp
 import asyncio
 
 from aiortc import (
@@ -15,54 +14,28 @@ from aiortc import (
 )
 from av import VideoFrame
 
-# ===============================
-# MediaPipe (GLOBAL) - reservado para uso futuro
-# ===============================
-# mp_face_mesh = mp.solutions.face_mesh
-# mp_drawing = mp.solutions.drawing_utils
-#
-# face_mesh = mp_face_mesh.FaceMesh(
-#     static_image_mode=False,
-#     max_num_faces=1,
-#     refine_landmarks=True,
-#     min_detection_confidence=0.5,
-#     min_tracking_confidence=0.5
-# )
-#
-# soft_green = mp_drawing.DrawingSpec(
-#     color=(0, 255, 0),
-#     thickness=1,
-#     circle_radius=1
-# )
-
-# ===============================
-# YOLO (GLOBAL) - COCO "person" = class 0
-# ===============================
 model = YOLO("yolov8n.pt")
 
 pcs = set()
 latest_jpeg = None
 latest_ts = 0.0
 latest_lock = asyncio.Lock()
-snapshot_interval = 0.4  # seconds
+snapshot_interval = 0.4
 
-# ===============================
-# Video Track Optimizado
-# ===============================
 class ProcessedVideoTrack(VideoStreamTrack):
 
     def __init__(self, source):
+        # Inicializa el track con el stream de video de entrada.
         super().__init__()
         self.source = source
         self.last_process_time = 0
-        self.process_interval = 1 / 24  # 24 FPS (equilibrado)
-        self.last_boxes = None        # 🔑 persistencia
-        # self.last_landmarks = None  # 🔑 reservado para MediaPipe
+        self.process_interval = 1 / 24
+        self.last_boxes = None
 
     async def recv(self):
+        # Recibe frames, aplica deteccion de personas y actualiza snapshots.
         frame = await self.source.recv()
 
-        # 🔑 descartar frames antiguos
         try:
             while self.source._queue.qsize() > 1:
                 frame = await self.source.recv()
@@ -80,19 +53,11 @@ class ProcessedVideoTrack(VideoStreamTrack):
                 img,
                 imgsz=640,
                 conf=0.25,
-                classes=[0],  # person
+                classes=[0],
                 verbose=False
             )
             if results and len(results) > 0:
                 self.last_boxes = results[0].boxes
-            # img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            # results = face_mesh.process(img_rgb)
-            # if results.multi_face_landmarks:
-            #     self.last_landmarks = results.multi_face_landmarks
-
-        # ===============================
-        # Dibujado de cajas
-        # ===============================
         if self.last_boxes is not None:
             for box in self.last_boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
@@ -107,35 +72,6 @@ class ProcessedVideoTrack(VideoStreamTrack):
                     (0, 255, 0),
                     2
                 )
-        # if self.last_landmarks:
-        #     overlay = img.copy()
-        #
-        #     for face_landmarks in self.last_landmarks:
-        #         mp_drawing.draw_landmarks(
-        #             image=overlay,
-        #             landmark_list=face_landmarks,
-        #             connections=mp_face_mesh.FACEMESH_LEFT_EYE,
-        #             landmark_drawing_spec=soft_green,
-        #             connection_drawing_spec=soft_green
-        #         )
-        #
-        #         mp_drawing.draw_landmarks(
-        #             image=overlay,
-        #             landmark_list=face_landmarks,
-        #             connections=mp_face_mesh.FACEMESH_RIGHT_EYE,
-        #             landmark_drawing_spec=soft_green,
-        #             connection_drawing_spec=soft_green
-        #         )
-        #
-        #         mp_drawing.draw_landmarks(
-        #             image=overlay,
-        #             landmark_list=face_landmarks,
-        #             connections=mp_face_mesh.FACEMESH_LIPS,
-        #             landmark_drawing_spec=soft_green,
-        #             connection_drawing_spec=soft_green
-        #         )
-        #
-        #     img = cv2.addWeighted(overlay, 0.4, img, 0.6, 0)
 
         cv2.putText(
             img,
@@ -147,7 +83,6 @@ class ProcessedVideoTrack(VideoStreamTrack):
             2
         )
 
-        # Guarda un snapshot JPEG cada cierto tiempo para /snapshot
         global latest_jpeg, latest_ts
         now2 = time.time()
         if now2 - latest_ts > snapshot_interval:
@@ -164,10 +99,8 @@ class ProcessedVideoTrack(VideoStreamTrack):
 
         return new_frame
 
-# ===============================
-# Offer
-# ===============================
 async def offer(request):
+    # Gestiona la oferta WebRTC y responde con el SDP de respuesta.
     params = await request.json()
 
     offer = RTCSessionDescription(
@@ -191,7 +124,7 @@ async def offer(request):
                 params = sender.getParameters()
                 if not params.encodings:
                     params.encodings = [{}]
-                params.encodings[0]["maxBitrate"] = 2_500_000  # 2.5 Mbps
+                params.encodings[0]["maxBitrate"] = 2_500_000
                 params.encodings[0]["maxFramerate"] = 30
                 sender.setParameters(params)
             except Exception as e:
@@ -206,27 +139,19 @@ async def offer(request):
         "type": pc.localDescription.type
     })
 
-# ===============================
-# Snapshot
-# ===============================
 async def snapshot(request):
+    # Devuelve el ultimo frame JPEG disponible.
     async with latest_lock:
         if latest_jpeg is None:
             return web.json_response({"error": "No hay frames aún"}, status=503)
         return web.Response(body=latest_jpeg, content_type="image/jpeg")
 
-# ===============================
-# Cleanup
-# ===============================
 async def cleanup(app):
+    # Cierra conexiones WebRTC activas al apagar el servicio.
     for pc in pcs:
         await pc.close()
     pcs.clear()
-    # face_mesh.close()
 
-# ===============================
-# App
-# ===============================
 app = web.Application()
 app.router.add_post("/offer", offer)
 app.router.add_get("/snapshot", snapshot)

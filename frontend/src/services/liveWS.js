@@ -27,6 +27,23 @@ export class LiveWS {
     // no petar: si falta env, simplemente desactivamos
     this.enabled = !!this.baseUrl
 
+    // Evitar mixed-content o localhost en producción
+    try {
+      const pageProtocol = window.location.protocol
+      const pageHost = window.location.hostname
+      const isHttpsPage = pageProtocol === 'https:'
+      const isHttpBase = this.baseUrl.startsWith('http://')
+      const isLocalBase = /^(http:\/\/|https:\/\/)?(localhost|127\.0\.0\.1)/i.test(this.baseUrl)
+      const isLocalPage = /^(localhost|127\.0\.0\.1)$/i.test(pageHost)
+
+      if ((isHttpsPage && isHttpBase) || (isLocalBase && !isLocalPage)) {
+        this.enabled = false
+        this.baseUrl = ''
+      }
+    } catch (e) {
+      // si falla, no bloqueamos
+    }
+
     this.ws = null
     this.role = 'player'
     this.isOpen = false

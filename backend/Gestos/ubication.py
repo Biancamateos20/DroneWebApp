@@ -1,12 +1,7 @@
 import requests
 
 def obtener_ubicacion(exacta=None):
-    """
-    exacta: dict con {"lat": valor, "lon": valor} si proviene de GPS o navegador.
-    Si no se pasa, devuelve ubicación aproximada por IP.
-    """
-
-    # Si recibimos ubicación exacta, la usamos
+    # Devuelve ubicacion exacta si se provee, o aproximada por IP.
     if exacta is not None:
         return {
             "metodo": "GPS/Navegador (ubicación exacta)",
@@ -15,7 +10,6 @@ def obtener_ubicacion(exacta=None):
             "precision": exacta.get("precision", "desconocida"),
         }
 
-    # Ubicación aproximada por IP
     try:
         respuesta = requests.get("https://ipinfo.io/json")
         datos = respuesta.json()
@@ -36,7 +30,5 @@ def obtener_ubicacion(exacta=None):
         print("Error obteniendo ubicación:", e)
         return None
 
-
-# ---- EJEMPLO ----
 info = obtener_ubicacion()
 print(info)
