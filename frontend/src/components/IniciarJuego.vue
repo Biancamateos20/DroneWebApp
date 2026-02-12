@@ -1,5 +1,5 @@
 <template>
-  <div class="admin-container">
+  <div class="admin-container" :class="{ 'camera-on': cameraActive }">
     <h1 class="title">Panel de Control</h1>
     <p class="subtitle">Administrador de la partida</p>
 
@@ -40,43 +40,118 @@
           </div>
         </div>
 
-        <div class="panel-actions">
-          <button class="btn neutral" @click="connectDrone" :disabled="connectLoading">
-            {{ droneConnected ? 'Desconectar' : 'Conectar dron' }}
-          </button>
+        <div class="lab-grid">
+          <div class="lab-group">
+            <div class="lab-title">Dron</div>
+            <label class="mini-field">
+              <span>Altura despegue (m)</span>
+              <input v-model.number="takeoffAlt" type="number" min="1" max="120" step="1" />
+            </label>
+            <div class="panel-actions lab-actions">
+              <button class="btn neutral" @click="connectDrone" :disabled="connectLoading">
+                {{ droneConnected ? 'Desconectar' : 'Conectar dron' }}
+              </button>
+              <button
+                class="btn"
+                :class="droneInAir ? 'danger' : 'takeoff'"
+                @click="toggleTakeoffLand"
+                :disabled="landLoading || !droneConnected"
+              >
+                {{ droneInAir ? '⬇ Land' : '🚀 Despegar' }}
+              </button>
+              <button
+                class="btn goto"
+                @click="gotoAdmin"
+                :disabled="gotoLoading || !droneConnected || !droneInAir || !adminPos"
+                title="Ir a la ubicación del administrador"
+              >
+                🧭 Ir al admin
+              </button>
+            </div>
+          </div>
 
-          <button class="btn info" @click="checkGpsPrecision" :disabled="gpsLoading">
-            📍 Ver precisión GPS
-          </button>
+          <div class="lab-group">
+            <div class="lab-title">Cámara</div>
+            <div class="panel-actions lab-actions">
+              <button class="btn cam" @click="toggleCamera" :disabled="cameraLoading">
+                {{ cameraActive ? '⏹ Cerrar cámara' : '🎥 Activar cámara' }}
+              </button>
+              <button class="btn photo" @click="hacerFoto" :disabled="photoLoading">
+                📸 Foto
+              </button>
+            </div>
+            <p v-if="cameraActive" class="mini-note">Vista de cámara activa</p>
+          </div>
 
-          <button class="btn photo" @click="hacerFoto" :disabled="photoLoading">
-            📸 Foto
-          </button>
-
-          <button class="btn danger" @click="landOnly" :disabled="landLoading">
-            ⬇ Land
-          </button>
+          <div class="lab-group">
+            <div class="lab-title">Ubicación</div>
+            <div class="panel-actions lab-actions">
+              <button class="btn info" @click="checkGpsPrecision" :disabled="gpsLoading">
+                📍 Ver precisión GPS
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div class="gps-box" v-if="gpsAccuracy != null">
-          Precisión actual: <strong>{{ gpsAccuracy }} m</strong>
-          <span v-if="gpsTimestamp">· {{ gpsTimestamp }}</span>
+        <div class="gps-box" v-if="gpsAccuracy != null || adminPos">
+          <div>
+            Precisión actual: <strong>{{ gpsAccuracy }} m</strong>
+            <span v-if="gpsTimestamp">· {{ gpsTimestamp }}</span>
+          </div>
+          <div v-if="adminPos" class="gps-coords">
+            Admin: {{ adminPos.lat.toFixed(6) }}, {{ adminPos.lon.toFixed(6) }}
+          </div>
         </div>
       </section>
     </div>
+
+    <section v-if="cameraActive" class="camera-bay" :class="cameraZoomClass">
+      <div class="camera-controls">
+        <label class="mini-field">
+          <span>Selecciona cámara</span>
+          <select v-model="selectedCameraId" @change="startStream">
+            <option v-for="cam in cameras" :key="cam.deviceId" :value="cam.deviceId">
+              {{ cam.label || 'Cámara sin nombre' }}
+            </option>
+          </select>
+        </label>
+
+        <div class="camera-toolbar">
+          <button class="btn tiny" @click="setCameraZoom('none')">Ver ambas</button>
+          <button class="btn tiny" @click="setCameraZoom('local')">Max Local</button>
+          <button class="btn tiny" @click="setCameraZoom('remote')">Max Procesado</button>
+        </div>
+
+        <p v-if="cameraError" class="mini-error">{{ cameraError }}</p>
+      </div>
+
+      <div class="camera-grid">
+        <div class="camera-card local">
+          <div class="camera-title">Local</div>
+          <video ref="localVideo" autoplay playsinline muted></video>
+        </div>
+        <div class="camera-card remote">
+          <div class="camera-title">Procesado</div>
+          <video ref="remoteVideo" autoplay playsinline muted></video>
+        </div>
+      </div>
+    </section>
 
     <p v-if="loading" class="subtitle">Lanzando misión…</p>
     <p v-if="photoLoading" class="subtitle">Capturando foto…</p>
     <p v-if="landLoading" class="subtitle">Enviando LAND…</p>
     <p v-if="connectLoading" class="subtitle">Conectando dron…</p>
+    <p v-if="cameraLoading" class="subtitle">Activando cámara…</p>
     <p v-if="gpsLoading" class="subtitle">Consultando precisión…</p>
+    <p v-if="gotoLoading" class="subtitle">Enviando GOTO…</p>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="photoError" class="error">{{ photoError }}</p>
     <p v-if="landError" class="error">{{ landError }}</p>
     <p v-if="gpsError" class="error">{{ gpsError }}</p>
+    <p v-if="gotoError" class="error">{{ gotoError }}</p>
 
     <div v-if="photoUrl" class="photo-panel">
-      <h3>Última foto</h3>
+      <h3>Última foto <span v-if="photoSource" class="photo-source">({{ photoSource }})</span></h3>
       <img :src="photoUrl" alt="Foto dron" />
     </div>
   </div>
@@ -108,17 +183,45 @@ export default {
       photoUrl: null,
       photoLoading: false,
       photoError: null,
+      photoSource: null,
       landLoading: false,
       landError: null,
 
       droneMode: 'sim',
       droneConnected: false,
       connectLoading: false,
+      droneInAir: false,
+      takeoffAlt: 5,
+
+      cameraActive: false,
+      cameraLoading: false,
+      cameraError: null,
+      cameras: [],
+      selectedCameraId: null,
+      cameraZoom: 'none',
+      pc: null,
+      localStream: null,
 
       gpsAccuracy: null,
       gpsTimestamp: null,
       gpsLoading: false,
-      gpsError: null
+      gpsError: null,
+      adminPos: null,
+      adminMarker: null,
+      adminAcc: null,
+      adminCentered: false,
+      gotoLoading: false,
+      gotoError: null
+    }
+  },
+
+  computed: {
+    cameraZoomClass() {
+      return this.cameraZoom === 'local'
+        ? 'zoom-local'
+        : this.cameraZoom === 'remote'
+          ? 'zoom-remote'
+          : 'zoom-none'
     }
   },
 
@@ -126,10 +229,23 @@ export default {
     this.initMap()
     this.initWS()
     this.startPollingFallback()
+
+    if (navigator.mediaDevices) {
+      this.deviceChangeHandler = async () => {
+        if (!this.cameraActive) return
+        await this.loadCameras()
+        await this.startStream()
+      }
+      navigator.mediaDevices.ondevicechange = this.deviceChangeHandler
+    }
   },
 
   beforeUnmount() {
     if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
+    this.cleanupCamera()
+    if (navigator.mediaDevices && navigator.mediaDevices.ondevicechange === this.deviceChangeHandler) {
+      navigator.mediaDevices.ondevicechange = null
+    }
     this.live?.disconnect()
     this.stopPollingFallback()
     if (this.map) {
@@ -139,6 +255,9 @@ export default {
   },
 
   methods: {
+    setCameraZoom(mode) {
+      this.cameraZoom = mode
+    },
     initWS() {
       this.live = new LiveWS()
 
@@ -217,7 +336,7 @@ export default {
       navigator.geolocation.getCurrentPosition(
         (pos) => start(pos.coords.latitude, pos.coords.longitude),
         () => start(fallbackLat, fallbackLon),
-        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
       )
     },
 
@@ -380,11 +499,29 @@ export default {
       this.photoError = null
       this.photoLoading = true
       try {
-        const res = await fetch('/api/foto', { method: 'POST' })
-        if (!res.ok) throw new Error('Error capturando foto')
-        const blob = await res.blob()
-        if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
-        this.photoUrl = URL.createObjectURL(blob)
+        const remoteVideo = this.$refs.remoteVideo
+        if (this.cameraActive && remoteVideo && remoteVideo.videoWidth > 0 && remoteVideo.videoHeight > 0) {
+          const canvas = document.createElement('canvas')
+          canvas.width = remoteVideo.videoWidth
+          canvas.height = remoteVideo.videoHeight
+          const ctx = canvas.getContext('2d')
+          if (!ctx) throw new Error('No se pudo crear el canvas')
+          ctx.drawImage(remoteVideo, 0, 0, canvas.width, canvas.height)
+
+          const blob = await new Promise((resolve, reject) => {
+            canvas.toBlob(
+              (b) => (b ? resolve(b) : reject(new Error('No se pudo generar la imagen'))),
+              'image/jpeg',
+              0.92
+            )
+          })
+
+          if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
+          this.photoUrl = URL.createObjectURL(blob)
+          this.photoSource = 'RTC'
+        } else {
+          throw new Error('Activa la cámara para capturar la imagen procesada')
+        }
       } catch (e) {
         this.photoError = e.message || 'Error capturando foto'
       } finally {
@@ -398,6 +535,7 @@ export default {
       try {
         const res = await fetch('/api/land', { method: 'POST' })
         if (!res.ok) throw new Error('Error enviando LAND')
+        this.droneInAir = false
       } catch (e) {
         this.landError = e.message || 'Error enviando LAND'
       } finally {
@@ -405,22 +543,59 @@ export default {
       }
     },
 
+    async takeoff() {
+      this.landError = null
+      this.landLoading = true
+      try {
+        const height = Number(this.takeoffAlt)
+        if (!Number.isFinite(height) || height <= 0) {
+          throw new Error('Altura de despegue inválida')
+        }
+        const res = await fetch('/api/despegue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ h: height })
+        })
+        if (!res.ok) throw new Error('Error en despegue')
+        const data = await res.json().catch(() => ({}))
+        if (data.ok === false || data.despegue === false) {
+          throw new Error('Despegue fallido')
+        }
+        this.droneInAir = true
+      } catch (e) {
+        this.landError = e.message || 'Error en despegue'
+      } finally {
+        this.landLoading = false
+      }
+    },
+
+    async toggleTakeoffLand() {
+      if (this.droneInAir) {
+        await this.landOnly()
+        return
+      }
+      await this.takeoff()
+    },
+
     async connectDrone() {
       this.error = null
       this.connectLoading = true
       try {
-        const action = this.droneConnected ? 'disconnect' : 'connect'
-        const res = await fetch('/api/connection', {
+        const endpoint = this.droneConnected ? '/api/disconnection' : '/api/connection'
+        const payload = this.droneConnected ? null : { tipo: this.droneMode === 'sim' ? 'Simulacion' : 'Real' }
+        const res = await fetch(endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode: this.droneMode, action })
+          headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+          body: payload ? JSON.stringify(payload) : undefined
         })
-        if (!res.ok) throw new Error('Error conectando dron')
+        if (!res.ok) throw new Error('Error conectando/desconectando dron')
         const data = await res.json().catch(() => ({}))
-        if (typeof data.connected === 'boolean') {
-          this.droneConnected = data.connected
+        if (this.droneConnected) {
+          const disconnected = typeof data.disconnected === 'boolean' ? data.disconnected : true
+          this.droneConnected = !disconnected
+          if (disconnected) this.droneInAir = false
         } else {
-          this.droneConnected = !this.droneConnected
+          this.droneConnected = typeof data.connected === 'boolean' ? data.connected : true
         }
       } catch (e) {
         this.error = e.message || 'Error conectando dron'
@@ -440,17 +615,214 @@ export default {
 
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const acc = Number(pos.coords.accuracy)
+          const { latitude, longitude, accuracy } = pos.coords
+          const acc = Number(accuracy)
           this.gpsAccuracy = Number.isFinite(acc) ? Math.round(acc) : null
           this.gpsTimestamp = new Date(pos.timestamp).toLocaleTimeString()
+          this.adminPos = { lat: Number(latitude), lon: Number(longitude) }
+          this.updateAdminLocation(latitude, longitude, acc)
           this.gpsLoading = false
         },
         (err) => {
           this.gpsError = err?.message || 'No se pudo leer la precisión'
           this.gpsLoading = false
         },
-        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
       )
+    },
+
+    ensureAdminLayers(latlng, accuracy) {
+      if (!this.mapReady || !this.map) return
+      if (!this.adminMarker) {
+        this.adminMarker = L.circleMarker(latlng, {
+          radius: 7,
+          weight: 2,
+          color: '#00e5ff',
+          fillColor: '#00e5ff',
+          fillOpacity: 0.9
+        }).addTo(this.map).bindPopup('Administrador')
+      }
+      if (!this.adminAcc) {
+        this.adminAcc = L.circle(latlng, {
+          radius: accuracy && accuracy > 0 ? accuracy : 5,
+          weight: 1,
+          color: '#00e5ff',
+          fillColor: '#00e5ff',
+          fillOpacity: 0.08
+        }).addTo(this.map)
+      }
+    },
+
+    updateAdminLocation(lat, lon, accuracy) {
+      if (!this.mapReady || !this.map) return
+      const latlng = [Number(lat), Number(lon)]
+      this.ensureAdminLayers(latlng, accuracy)
+      if (this.adminMarker) this.adminMarker.setLatLng(latlng)
+      if (this.adminAcc) this.adminAcc.setLatLng(latlng)
+      if (this.adminAcc && Number.isFinite(accuracy) && accuracy > 0) {
+        this.adminAcc.setRadius(accuracy)
+      }
+      if (!this.adminCentered) {
+        this.map.setView(latlng, 18)
+        this.adminCentered = true
+      }
+    },
+
+    async toggleCamera() {
+      this.cameraError = null
+      if (this.cameraActive) {
+        this.cleanupCamera()
+        this.cameraActive = false
+        this.cameraZoom = 'none'
+        return
+      }
+      this.cameraLoading = true
+      try {
+        await this.loadCameras()
+        this.cameraActive = true
+        await this.$nextTick()
+        if (this.selectedCameraId || this.cameras.length) {
+          await this.startStream()
+        }
+      } catch (e) {
+        this.cameraError = e.message || 'Error activando cámara'
+      } finally {
+        this.cameraLoading = false
+      }
+    },
+
+    async loadCameras() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Cámara no disponible en este navegador')
+      }
+      try {
+        const tempStream = await navigator.mediaDevices.getUserMedia({ video: true })
+        tempStream.getTracks().forEach(t => t.stop())
+      } catch (e) {
+        throw new Error('Permiso de cámara denegado')
+      }
+
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      this.cameras = devices.filter(d => d.kind === 'videoinput')
+      if (this.cameras.length && !this.selectedCameraId) {
+        this.selectedCameraId = this.cameras[0].deviceId
+      }
+    },
+
+    async startStream() {
+      if (!this.cameraActive) return
+      this.cleanupCamera()
+      try {
+        this.pc = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        })
+
+        this.pc.ontrack = async (event) => {
+          const stream = new MediaStream([event.track])
+          const remoteVideo = this.$refs.remoteVideo
+          if (remoteVideo) {
+            remoteVideo.srcObject = stream
+            await remoteVideo.play().catch(() => {})
+          }
+        }
+
+        this.localStream = await navigator.mediaDevices.getUserMedia({
+          video: this.selectedCameraId
+            ? {
+                deviceId: { exact: this.selectedCameraId },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 30, max: 30 }
+              }
+            : {
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 30, max: 30 }
+              },
+          audio: false
+        })
+
+        const localVideo = this.$refs.localVideo
+        if (localVideo) localVideo.srcObject = this.localStream
+
+        this.localStream.getTracks().forEach(track => {
+          this.pc.addTrack(track, this.localStream)
+        })
+
+        const offer = await this.pc.createOffer()
+        await this.pc.setLocalDescription(offer)
+        await this.waitForIceGathering(this.pc)
+
+        const offerUrl = (process.env.VUE_APP_WEBRTC_TARGET
+          ? `${process.env.VUE_APP_WEBRTC_TARGET.replace(/\/$/, '')}/offer`
+          : '/webrtc/offer')
+
+        const response = await fetch(offerUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sdp: this.pc.localDescription.sdp,
+            type: this.pc.localDescription.type
+          })
+        })
+
+        const answer = await response.json()
+        await this.pc.setRemoteDescription(answer)
+      } catch (e) {
+        this.cameraError = e.message || 'Error iniciando cámara'
+        this.cleanupCamera()
+      }
+    },
+
+    cleanupCamera() {
+      if (this.localStream) {
+        this.localStream.getTracks().forEach(t => t.stop())
+        this.localStream = null
+      }
+      if (this.pc) {
+        this.pc.close()
+        this.pc = null
+      }
+      const localVideo = this.$refs.localVideo
+      if (localVideo) localVideo.srcObject = null
+      const remoteVideo = this.$refs.remoteVideo
+      if (remoteVideo) remoteVideo.srcObject = null
+    },
+
+    waitForIceGathering(pc) {
+      return new Promise(resolve => {
+        if (pc.iceGatheringState === 'complete') return resolve()
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === 'complete') resolve()
+        }
+      })
+    },
+
+    async gotoAdmin() {
+      this.gotoError = null
+      if (!this.adminPos) {
+        this.gotoError = 'Ubicación del administrador no disponible'
+        return
+      }
+      this.gotoLoading = true
+      try {
+        const res = await fetch('/api/goto-admin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lat: this.adminPos.lat,
+            lon: this.adminPos.lon,
+            h: Number(this.takeoffAlt)
+          })
+        })
+        if (!res.ok) throw new Error('Error enviando GOTO')
+        const data = await res.json().catch(() => ({}))
+        if (data.ok === false) throw new Error(data.error || 'GOTO fallido')
+      } catch (e) {
+        this.gotoError = e.message || 'Error enviando GOTO'
+      } finally {
+        this.gotoLoading = false
+      }
     }
   }
 }
@@ -458,44 +830,56 @@ export default {
 
 <style scoped>
 .admin-container {
-  height: 100vh;
+  min-height: 100vh;
   background: radial-gradient(circle at top, #111 0%, #000 60%);
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   align-items: center;
   color: white;
   text-align: center;
+  padding: 18px 0 18px;
+  overflow: auto;
 }
 
 .title {
-  font-size: 2.4rem;
+  font-size: 2rem;
   font-weight: 600;
-  margin-bottom: 5px;
+  margin-bottom: 4px;
 }
 
 .subtitle {
-  font-size: 1rem;
+  font-size: 0.95rem;
   color: #aaa;
-  margin-bottom: 30px;
+  margin-bottom: 16px;
 }
 
 .map {
-  width: 80%;
-  max-width: 900px;
-  height: 500px;
-  margin-bottom: 40px;
+  width: 96%;
+  max-width: 1400px;
+  flex: 1 1 auto;
+  height: 46vh;
+  min-height: 320px;
+  max-height: 480px;
+  margin-bottom: 14px;
   border-radius: 14px;
   overflow: hidden;
   box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
 }
 
+.admin-container.camera-on .map {
+  height: 38vh;
+  min-height: 260px;
+  max-height: 420px;
+}
+
 .control-grid {
-  width: 80%;
-  max-width: 900px;
+  width: 96%;
+  max-width: 1400px;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 20px;
+  margin-bottom: 10px;
 }
 
 .panel {
@@ -519,10 +903,164 @@ export default {
   font-size: 0.9rem;
 }
 
-.panel-actions {
-  display: flex;
-  flex-wrap: wrap;
+.lab-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+}
+
+.lab-group {
+  background: #0b0b0b;
+  border: 1px solid #1a1a1a;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lab-title {
+  font-size: 0.85rem;
+  letter-spacing: 0.6px;
+  color: #c9c9c9;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.mini-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #bdbdbd;
+}
+
+.mini-field input {
+  background: #111;
+  color: #e5e7eb;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.mini-field select {
+  background: #111;
+  color: #e5e7eb;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.mini-note {
+  margin: 8px 0 0 0;
+  font-size: 0.8rem;
+  color: #9fb0c5;
+}
+
+.camera-bay {
+  width: 96%;
+  max-width: 1400px;
+  border-radius: 12px;
+  background: #0b0b0b;
+  border: 1px solid #1b1b1b;
+  padding: 12px;
+  margin-bottom: 8px;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 12px;
+  height: 24vh;
+  min-height: 200px;
+  align-items: stretch;
+}
+
+.camera-controls {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.camera-toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.camera-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+}
+
+.camera-card {
+  background: #0f1318;
+  border: 1px solid #1f2a35;
+  border-radius: 10px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.camera-title {
+  font-size: 0.75rem;
+  color: #9fb0c5;
+  margin-bottom: 6px;
+}
+
+.camera-card video {
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  background: #05070a;
+  border-radius: 8px;
+  display: block;
+  object-fit: cover;
+}
+
+.camera-bay.zoom-local .camera-card.remote,
+.camera-bay.zoom-remote .camera-card.local {
+  display: none;
+}
+
+.camera-bay.zoom-local .camera-grid,
+.camera-bay.zoom-remote .camera-grid {
+  grid-template-columns: 1fr;
+}
+
+.camera-bay.zoom-local .camera-card.local video,
+.camera-bay.zoom-remote .camera-card.remote video {
+  max-height: 100%;
+}
+
+.btn.tiny {
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  border-radius: 8px;
+}
+
+.mini-error {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #ff8b8b;
+}
+
+.panel-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.panel-actions.lab-actions {
+  grid-template-columns: 1fr;
+}
+
+.btn-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
 
 .row {
@@ -571,9 +1109,10 @@ export default {
 }
 
 .btn {
-  min-width: 220px;
-  padding: 18px 25px;
-  font-size: 1.1rem;
+  min-width: 0;
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 0.9rem;
   font-weight: 600;
   border-radius: 10px;
   border: none;
@@ -612,6 +1151,21 @@ export default {
   color: white;
 }
 
+.btn.cam {
+  background: linear-gradient(135deg, #a78bfa, #6366f1);
+  color: #1f143d;
+}
+
+.btn.takeoff {
+  background: linear-gradient(135deg, #34d399, #10b981);
+  color: #003320;
+}
+
+.btn.goto {
+  background: linear-gradient(135deg, #60a5fa, #3b82f6);
+  color: #0b1b3a;
+}
+
 .btn.start:hover:not(:disabled),
 .btn.photo:hover:not(:disabled),
 .btn.stop:hover {
@@ -620,7 +1174,10 @@ export default {
 
 .btn.neutral:hover:not(:disabled),
 .btn.info:hover:not(:disabled),
-.btn.danger:hover:not(:disabled) {
+.btn.danger:hover:not(:disabled),
+.btn.cam:hover:not(:disabled),
+.btn.takeoff:hover:not(:disabled),
+.btn.goto:hover:not(:disabled) {
   transform: translateY(-2px);
 }
 
@@ -640,10 +1197,16 @@ export default {
   color: #cbd5f5;
 }
 
+.gps-coords {
+  margin-top: 6px;
+  font-size: 0.85rem;
+  color: #a9b9e9;
+}
+
 .photo-panel {
-  margin-top: 20px;
-  width: 80%;
-  max-width: 900px;
+  margin-top: 12px;
+  width: 96%;
+  max-width: 1400px;
   background: #0c0c0c;
   border: 1px solid #222;
   border-radius: 12px;
@@ -658,9 +1221,17 @@ export default {
   font-weight: 600;
 }
 
+.photo-source {
+  font-size: 0.85rem;
+  color: #9fb0c5;
+  font-weight: 500;
+}
+
 .photo-panel img {
   width: 100%;
+  max-height: 260px;
   height: auto;
+  object-fit: contain;
   display: block;
   border-radius: 8px;
   border: 1px solid #111;

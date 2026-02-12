@@ -196,8 +196,21 @@ def foto():
 def land():
     # Envia la orden de aterrizaje a la VM.
     try:
-        resp = requests.post(f"{VM_BASE_URL}/land", timeout=3)
-        return jsonify({"status": "ok", "vm_status": resp.status_code}), 200
+        resp = requests.post(f"{VM_BASE_URL}/land", timeout=10)
+        if not resp.ok:
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"ok": False, "error": "Error en VM"}
+            return jsonify(data), resp.status_code
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"ok": True, "land": True}
+        return jsonify(data), 200
+    except requests.exceptions.Timeout:
+        # Si tarda en responder pero el dron ya aterrizó, evitamos romper el flujo UI.
+        return jsonify({"ok": True, "land": True, "warning": "Timeout VM"}), 202
     except Exception as e:
         print("⚠️ Error enviando LAND a la VM:", e)
         return jsonify({"error": "Error enviando LAND a la VM"}), 502
@@ -236,8 +249,10 @@ def estado_juego():
 @app.route("/connection", methods=["POST"])
 def connection():
     # Proxy al endpoint real de la VM para conectar el dron.
+    data = request.get_json() or {}
+    tipo = data.get("tipo")
     try:
-        resp = requests.post(f"{VM_BASE_URL}/connection", timeout=3)
+        resp = requests.post(f"{VM_BASE_URL}/connection", json={"tipo": tipo}, timeout=3)
         if not resp.ok:
             return jsonify({"ok": False, "error": "Error en VM", "vm_status": resp.status_code}), 502
         data = {}
@@ -250,6 +265,93 @@ def connection():
     except Exception as e:
         print("⚠️ Error conectando dron a la VM:", e)
         return jsonify({"ok": False, "error": "Error comunicando con la VM"}), 502
+
+@app.route("/disconnection", methods=['POST'])
+def disconnection():
+    try:
+        resp = requests.post(f"{VM_BASE_URL}/disconnection", timeout = 3)
+        if not resp.ok:
+            return jsonify({"ok": False, "error": "Error en VM", "vm_status": resp.status_code}), 502
+        data = {}
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        disconnected = bool(data.get("disconnected", True))
+        return jsonify({"ok": True, "disconnected": disconnected}), 200
+    except Exception as e:
+        print("⚠️ Error conectando dron a la VM:", e)
+        return jsonify({"ok": False, "error": "Error comunicando con la VM"}), 502
+    
+@app.route("/despegue", methods=["POST"])
+def despegue():
+    # Proxy al endpoint real de la VM para despegar.
+    data = request.get_json() or {}
+    height = data.get("height")
+    h = data.get("h", height)
+
+    try:
+        resp = requests.post(f"{VM_BASE_URL}/despegue", json={"h": h}, timeout=20)
+        if not resp.ok:
+            return jsonify({"ok": False, "error": "Error en VM", "vm_status": resp.status_code}), 502
+        vm_data = {}
+        try:
+            vm_data = resp.json()
+        except Exception:
+            vm_data = {}
+        despegue_ok = bool(vm_data.get("despegue", True))
+        return jsonify({"ok": True, "despegue": despegue_ok}), 200
+    except requests.exceptions.Timeout:
+        # La VM puede tardar en responder aunque el dron ya haya despegado.
+        return jsonify({"ok": False, "error": "Timeout comunicando con la VM"}), 504
+    except Exception as e:
+        print("⚠️ Error enviando despegue a la VM:", e)
+        return jsonify({"ok": False, "error": "Error comunicando con la VM"}), 502
+
+@app.route("/goto-admin", methods=["POST"])
+def goto_admin():
+    # Proxy para enviar GOTO a la VM con lat/lon del administrador.
+    data = request.get_json() or {}
+    lat = data.get("lat")
+    lon = data.get("lon")
+    h = data.get("h")
+    if lat is None or lon is None:
+        return jsonify({"ok": False, "error": "Faltan lat/lon"}), 400
+    try:
+        resp = requests.post(
+            f"{VM_BASE_URL}/GoTo",
+            json={"lat": lat, "lon": lon, "h": h},
+            timeout=20
+        )
+        if not resp.ok:
+            try:
+                vm_data = resp.json()
+            except Exception:
+                vm_data = {"ok": False, "error": "Error en VM"}
+            return jsonify(vm_data), resp.status_code
+        try:
+            vm_data = resp.json()
+        except Exception:
+            vm_data = {"ok": True}
+        return jsonify(vm_data), 200
+    except requests.exceptions.Timeout:
+        # La VM puede tardar en responder aunque ya esté ejecutando el goto.
+        return jsonify({"ok": True, "goto": True, "warning": "Timeout VM"}), 202
+    except Exception as e:
+        print("⚠️ Error enviando GOTO a la VM:", e)
+        return jsonify({"ok": False, "error": "Error comunicando con la VM"}), 502
+    
+# @app.route("/land", methods = ['POST'])
+# def land():
+#     try:
+#         resp = requests.post(f"{VM_BASE_URL}/land")
+#         if not resp.ok:
+#             return jsonify({"ok": False, "Error": "Error en land", "vm_status": resp.status_code}), 502
+#         else:
+#             return jsonify({"ok": True})
+        
+#     except Exception as e:
+#         return False
 
 if __name__ == "__main__":
     print("Servidor Flask proxy en http://127.0.0.1:5001")
