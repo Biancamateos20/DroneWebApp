@@ -410,6 +410,21 @@ export default {
       this.markers = {}
     },
 
+    clearAdminLocation() {
+      if (this.adminMarker) {
+        try { this.adminMarker.remove() } catch (e) { console.warn("Error", e) }
+      }
+      if (this.adminAcc) {
+        try { this.adminAcc.remove() } catch (e) { console.warn("Error", e) }
+      }
+      this.adminMarker = null
+      this.adminAcc = null
+      this.adminPos = null
+      this.gpsAccuracy = null
+      this.gpsTimestamp = null
+      this.adminCentered = false
+    },
+
     startPollingFallback() {
       this.stopPollingFallback()
       this.pollTimer = setInterval(async () => {
@@ -490,6 +505,7 @@ export default {
         // ✅ Reset global del live:
         this.live.reset()
         this.clearMarkers()
+        this.clearAdminLocation()
       } catch {
         this.error = 'Error al parar el juego'
       }

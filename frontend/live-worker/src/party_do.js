@@ -3,11 +3,14 @@ export class PartyDO {
     this.state = state;
     this.env = env;
 
+    this.INACTIVITY_MS = 30 * 60 * 1000;
+
     this.sockets = new Map();   // connId -> WebSocket
     this.connMeta = new Map();  // connId -> { role, alias, playerId }
 
     this.players = new Map();   // alias -> {alias, lat, lon, precision, ts, ...}
     this.gameState = { juego_en_curso: false, reset_id: 0, game_start_id: 0 };
+    this.lastActivityAt = 0;
 
     this.pendingPersist = false;
 
@@ -24,6 +27,11 @@ export class PartyDO {
           reset_id: Number(storedState.reset_id ?? 0),
           game_start_id: Number(storedState.game_start_id ?? 0),
         };
+      }
+
+      const storedMeta = await this.state.storage.get("meta");
+      if (storedMeta && typeof storedMeta === "object") {
+        this.lastActivityAt = Number(storedMeta.lastActivityAt ?? 0);
       }
     });
   }
@@ -64,9 +72,36 @@ export class PartyDO {
     this.state.storage.setAlarm(Date.now() + 1000);
   }
 
+  touchActivity() {
+    this.lastActivityAt = Date.now();
+  }
+
+  maybeAutoReset() {
+    if (!this.lastActivityAt) return false;
+    if (this.gameState.juego_en_curso) return false;
+    if (Date.now() - this.lastActivityAt < this.INACTIVITY_MS) return false;
+    this.resetState({ reason: "auto", broadcast: true });
+    return true;
+  }
+
+  resetState({ reason = "manual", broadcast = true } = {}) {
+    this.players.clear();
+    this.gameState.juego_en_curso = false;
+    this.gameState.reset_id += 1;
+    this.touchActivity();
+    this.schedulePersist();
+
+    if (broadcast) {
+      this.broadcastAll({ type: "reset", reset_id: this.gameState.reset_id, reason });
+      this.broadcastAll({ type: "occupancy", aliases: [] });
+      this.broadcastAll({ type: "game_state", ...this.gameState });
+    }
+  }
+
   async alarm() {
     await this.state.storage.put("players", this.getSnapshot());
     await this.state.storage.put("gameState", this.gameState);
+    await this.state.storage.put("meta", { lastActivityAt: this.lastActivityAt });
     this.pendingPersist = false;
 
     // Limpieza players stale (10 min)
@@ -79,6 +114,7 @@ export class PartyDO {
 
   // ---------------- handlers
   handleJoin(connId, data) {
+    this.maybeAutoReset();
     const role = data.role === "admin" ? "admin" : "player";
     const alias = data.alias ? String(data.alias) : null;
     const playerId = data.playerId ? String(data.playerId) : null;
@@ -94,9 +130,12 @@ export class PartyDO {
 
     // ocupación a todos
     this.broadcastAll({ type: "occupancy", aliases: this.getAliases() });
+    this.touchActivity();
+    this.schedulePersist();
   }
 
   handleLoc(connId, data) {
+    this.maybeAutoReset();
     const meta = this.connMeta.get(connId);
     if (!meta || meta.role !== "player") return;
 
@@ -125,6 +164,7 @@ export class PartyDO {
 
     // si era la primera vez, queda ocupado el color
     this.players.set(alias, updated);
+    this.touchActivity();
     this.schedulePersist();
 
     // update instantáneo a admins
@@ -135,11 +175,13 @@ export class PartyDO {
   }
 
   handleStart(connId) {
+    this.maybeAutoReset();
     const meta = this.connMeta.get(connId);
     if (!meta || meta.role !== "admin") return;
 
     this.gameState.juego_en_curso = true;
     this.gameState.game_start_id += 1;
+    this.touchActivity();
     this.schedulePersist();
     this.broadcastAll({ type: "game_state", ...this.gameState });
   }
@@ -148,15 +190,7 @@ export class PartyDO {
     const meta = this.connMeta.get(connId);
     if (!meta || meta.role !== "admin") return;
 
-    this.players.clear();
-    this.gameState.juego_en_curso = false;
-    this.gameState.reset_id += 1;
-
-    this.schedulePersist();
-
-    this.broadcastAll({ type: "reset", reset_id: this.gameState.reset_id });
-    this.broadcastAll({ type: "occupancy", aliases: [] });
-    this.broadcastAll({ type: "game_state", ...this.gameState });
+    this.resetState({ reason: "manual", broadcast: true });
   }
 
   // ---------------- router
@@ -202,6 +236,7 @@ export class PartyDO {
 
     // Debug HTTP: ver jugadores
     if (path.endsWith("/jugadores") && request.method === "GET") {
+      this.maybeAutoReset();
       return new Response(JSON.stringify(this.getSnapshot()), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -210,7 +245,16 @@ export class PartyDO {
 
     // Debug HTTP: ver estado juego
     if (path.endsWith("/estado-juego") && request.method === "GET") {
+      this.maybeAutoReset();
       return new Response(JSON.stringify(this.gameState), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (path.endsWith("/reset") && request.method === "POST") {
+      this.resetState({ reason: "http", broadcast: true });
+      return new Response(JSON.stringify({ ok: true, reset_id: this.gameState.reset_id }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });

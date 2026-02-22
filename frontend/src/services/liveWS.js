@@ -76,6 +76,29 @@ export class LiveWS {
     return `${wsBase}/ws?game=${encodeURIComponent(this.game)}`
   }
 
+  _httpBase() {
+    if (!this.enabled) return ''
+    let base = this.baseUrl.replace(/\/$/, '')
+    try {
+      const isHttpsPage = window.location.protocol === 'https:'
+      const isHttpBase = base.startsWith('http://')
+      const isLocalBase = /^(http:\/\/|https:\/\/)?(localhost|127\.0\.0\.1)/i.test(base)
+      const isLocalPage = /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
+      if ((isHttpsPage && isHttpBase) || (isLocalBase && !isLocalPage)) {
+        base = ''
+      }
+    } catch (e) {
+      // ignore
+    }
+    return base
+  }
+
+  _httpUrl(path) {
+    const base = this._httpBase()
+    if (!base) return ''
+    return `${base}${path}`
+  }
+
   connect({ role = 'player', alias } = {}) {
     this.role = role
     if (alias) this.setAlias(alias)
@@ -164,7 +187,12 @@ export class LiveWS {
   }
 
   reset() {
-    this.send({ type: 'reset' })
+    const sent = this.send({ type: 'reset' })
+    if (!sent) {
+      const url = this._httpUrl('/reset')
+      if (!url) return
+      fetch(url, { method: 'POST' }).catch(() => {})
+    }
   }
 
   disconnect() {

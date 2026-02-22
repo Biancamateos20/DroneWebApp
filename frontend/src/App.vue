@@ -65,7 +65,6 @@ export default {
           const startId = Number(msg.game_start_id ?? msg.start_id ?? 0)
           if (this.shouldStartWithId(startId)) {
             this.markStartSeen(startId)
-            this.stopGamePolling()
             this.screen = 'webrtc'
           }
         }
@@ -170,7 +169,9 @@ export default {
     startGamePolling() {
       this.stopGamePolling()
       this.gamePollTimer = setInterval(async () => {
-        if (this.screen !== 'waiting') return
+        if (this.screen !== 'waiting' && this.screen !== 'webrtc') return
+        const canUseWs = this.live?.enabled && this.live?.isOpen
+        if (this.screen === 'webrtc' && canUseWs) return
         try {
           const res = await fetch('/api/estado-juego')
           if (!res.ok) return
@@ -181,11 +182,10 @@ export default {
             this.handleReset()
             return
           }
-          if (data?.juego_en_curso === true) {
+          if (this.screen === 'waiting' && data?.juego_en_curso === true) {
             const startId = Number(data.game_start_id ?? 0)
             if (this.shouldStartWithId(startId)) {
               this.markStartSeen(startId)
-              this.stopGamePolling()
               this.screen = 'webrtc'
             }
           }
