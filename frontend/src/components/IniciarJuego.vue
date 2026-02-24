@@ -34,11 +34,21 @@
             </select>
           </label>
 
-          <div class="status">
-            <span class="dot" :class="{ on: droneConnected }"></span>
-            {{ droneConnected ? 'Dron conectado' : 'Dron desconectado' }}
+          <div class="status-wrap">
+            <div class="status">
+              <span class="dot" :class="{ on: droneConnected }"></span>
+              {{ droneConnected ? 'Dron conectado' : 'Dron desconectado' }}
+            </div>
+            <div class="status small">
+              <span class="dot" :class="{ on: mqttConnected }"></span>
+              {{ mqttConnected ? 'MQTT conectado' : 'MQTT desconectado' }}
+            </div>
           </div>
         </div>
+        <p v-if="telemetryAlt !== null" class="mini-note">
+          Altitud telemetría: {{ telemetryAlt }} m
+          <span v-if="lastDroneState">· {{ lastDroneState }}</span>
+        </p>
 
         <div class="lab-grid">
           <div class="lab-group">
@@ -179,6 +189,20 @@ export default {
       live: null,
       wsReady: false,
       pollTimer: null,
+      mqttClient: null,
+      mqttConnected: false,
+      mqttBrokerUrl: (process.env.VUE_APP_MQTT_BROKER_URL || 'ws://broker.hivemq.com:8000/mqtt').trim(),
+      mqttSubTopic: (process.env.VUE_APP_MQTT_SUB_TOPIC || 'demoDash/mobileFlask/#').trim(),
+      mqttTelemetryTopic: (process.env.VUE_APP_MQTT_TOPIC_TELEMETRY || 'demoDash/mobileFlask/telemetryInfo').trim(),
+      mqttTopics: {
+        connect: (process.env.VUE_APP_MQTT_TOPIC_CONNECT || 'mobileFlask/demoDash/connect').trim(),
+        disconnect: (process.env.VUE_APP_MQTT_TOPIC_DISCONNECT || 'mobileFlask/demoDash/disconnection').trim(),
+        takeoff: (process.env.VUE_APP_MQTT_TOPIC_TAKEOFF || 'mobileFlask/demoDash/arm_takeOff').trim(),
+        land: (process.env.VUE_APP_MQTT_TOPIC_LAND || 'mobileFlask/demoDash/Land').trim(),
+        goto: (process.env.VUE_APP_MQTT_TOPIC_GOTO || 'mobileFlask/demoDash/GoTo').trim()
+      },
+      telemetryAlt: null,
+      lastDroneState: null,
 
       photoUrl: null,
       photoLoading: false,
@@ -229,6 +253,7 @@ export default {
     this.initMap()
     this.initWS()
     this.startPollingFallback()
+    this.initMqtt()
 
     if (navigator.mediaDevices) {
       this.deviceChangeHandler = async () => {
@@ -246,6 +271,7 @@ export default {
     if (navigator.mediaDevices && navigator.mediaDevices.ondevicechange === this.deviceChangeHandler) {
       navigator.mediaDevices.ondevicechange = null
     }
+    this.disconnectMqtt()
     this.live?.disconnect()
     this.stopPollingFallback()
     if (this.map) {
@@ -258,6 +284,109 @@ export default {
     setCameraZoom(mode) {
       this.cameraZoom = mode
     },
+    initMqtt() {
+      const mqttLib = typeof window !== 'undefined' ? window.mqtt : null
+      if (!mqttLib) {
+        this.error = 'No se encontró la librería MQTT en el navegador'
+        return
+      }
+
+      this.disconnectMqtt()
+      try {
+        this.mqttClient = mqttLib.connect(this.mqttBrokerUrl)
+      } catch (e) {
+        this.error = e.message || 'No se pudo crear el cliente MQTT'
+        return
+      }
+
+      this.mqttClient.on('connect', () => {
+        this.mqttConnected = true
+        this.mqttClient.subscribe(this.mqttSubTopic, (err) => {
+          if (err) {
+            console.warn('Error en suscripción MQTT:', err)
+          }
+        })
+      })
+
+      this.mqttClient.on('message', (topic, message) => {
+        this.handleMqttMessage(topic, message)
+      })
+
+      this.mqttClient.on('close', () => {
+        this.mqttConnected = false
+      })
+
+      this.mqttClient.on('error', (err) => {
+        console.warn('Error MQTT:', err)
+        this.mqttConnected = false
+      })
+    },
+
+    disconnectMqtt() {
+      if (this.mqttClient) {
+        try {
+          this.mqttClient.end(true)
+        } catch (e) {
+          console.warn('Error cerrando MQTT:', e)
+        }
+      }
+      this.mqttClient = null
+      this.mqttConnected = false
+    },
+
+    mqttPublish(topic, payload = '') {
+      return new Promise((resolve, reject) => {
+        if (!this.mqttClient || !this.mqttConnected) {
+          reject(new Error('MQTT no conectado'))
+          return
+        }
+        this.mqttClient.publish(topic, payload, {}, (err) => {
+          if (err) {
+            reject(err)
+            return
+          }
+          resolve()
+        })
+      })
+    },
+
+    handleMqttMessage(topic, message) {
+      if (topic !== this.mqttTelemetryTopic) return
+      let data = null
+      try {
+        data = JSON.parse(message.toString())
+      } catch (e) {
+        console.warn('Mensaje telemetría inválido:', e)
+        return
+      }
+
+      const alt = Number(data?.alt)
+      if (Number.isFinite(alt)) {
+        this.telemetryAlt = alt
+      }
+
+      const state = String(data?.state || '').trim().toLowerCase()
+      if (!state) return
+
+      this.lastDroneState = state
+      if (['flying', 'takingoff', 'hovering', 'airborne'].includes(state)) {
+        this.droneConnected = true
+        this.droneInAir = true
+        return
+      }
+      if (['landed', 'landing', 'ready', 'idle'].includes(state)) {
+        this.droneConnected = true
+        this.droneInAir = false
+        return
+      }
+      if (['disconnected', 'offline'].includes(state)) {
+        this.droneConnected = false
+        this.droneInAir = false
+        return
+      }
+      this.droneConnected = true
+    },
+
     initWS() {
       this.live = new LiveWS()
 
@@ -549,8 +678,7 @@ export default {
       this.landError = null
       this.landLoading = true
       try {
-        const res = await fetch('/api/land', { method: 'POST' })
-        if (!res.ok) throw new Error('Error enviando LAND')
+        await this.mqttPublish(this.mqttTopics.land)
         this.droneInAir = false
       } catch (e) {
         this.landError = e.message || 'Error enviando LAND'
@@ -567,16 +695,8 @@ export default {
         if (!Number.isFinite(height) || height <= 0) {
           throw new Error('Altura de despegue inválida')
         }
-        const res = await fetch('/api/despegue', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ h: height })
-        })
-        if (!res.ok) throw new Error('Error en despegue')
-        const data = await res.json().catch(() => ({}))
-        if (data.ok === false || data.despegue === false) {
-          throw new Error('Despegue fallido')
-        }
+        await this.mqttPublish(this.mqttTopics.takeoff, String(height))
+        this.droneConnected = true
         this.droneInAir = true
       } catch (e) {
         this.landError = e.message || 'Error en despegue'
@@ -597,21 +717,13 @@ export default {
       this.error = null
       this.connectLoading = true
       try {
-        const endpoint = this.droneConnected ? '/api/disconnection' : '/api/connection'
-        const payload = this.droneConnected ? null : { tipo: this.droneMode === 'sim' ? 'Simulacion' : 'Real' }
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: payload ? { 'Content-Type': 'application/json' } : undefined,
-          body: payload ? JSON.stringify(payload) : undefined
-        })
-        if (!res.ok) throw new Error('Error conectando/desconectando dron')
-        const data = await res.json().catch(() => ({}))
         if (this.droneConnected) {
-          const disconnected = typeof data.disconnected === 'boolean' ? data.disconnected : true
-          this.droneConnected = !disconnected
-          if (disconnected) this.droneInAir = false
+          await this.mqttPublish(this.mqttTopics.disconnect)
+          this.droneConnected = false
+          this.droneInAir = false
         } else {
-          this.droneConnected = typeof data.connected === 'boolean' ? data.connected : true
+          await this.mqttPublish(this.mqttTopics.connect)
+          this.droneConnected = true
         }
       } catch (e) {
         this.error = e.message || 'Error conectando dron'
@@ -822,18 +934,11 @@ export default {
       }
       this.gotoLoading = true
       try {
-        const res = await fetch('/api/goto-admin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            lat: this.adminPos.lat,
-            lon: this.adminPos.lon,
-            h: Number(this.takeoffAlt)
-          })
-        })
-        if (!res.ok) throw new Error('Error enviando GOTO')
-        const data = await res.json().catch(() => ({}))
-        if (data.ok === false) throw new Error(data.error || 'GOTO fallido')
+        await this.mqttPublish(this.mqttTopics.goto, JSON.stringify({
+          lat: this.adminPos.lat,
+          lon: this.adminPos.lon,
+          h: Number(this.takeoffAlt)
+        }))
       } catch (e) {
         this.gotoError = e.message || 'Error enviando GOTO'
       } finally {
@@ -1109,6 +1214,18 @@ export default {
   gap: 8px;
   font-size: 0.9rem;
   color: #cfcfcf;
+}
+
+.status-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.status.small {
+  font-size: 0.8rem;
+  color: #a9a9a9;
 }
 
 .dot {
