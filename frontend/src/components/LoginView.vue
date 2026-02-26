@@ -238,10 +238,13 @@ export default {
 
 .login-shell {
   min-height: 100vh;
+  min-height: 100dvh;
   color: #eef1f6;
   font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .bg {
@@ -310,15 +313,11 @@ export default {
   transition: transform 0.2s ease, border-color 0.2s ease;
 }
 
-.admin-button:hover {
-  transform: translateY(-1px);
-  border-color: rgba(255, 255, 255, 0.5);
-}
-
 .login-container {
   position: relative;
   z-index: 2;
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -436,12 +435,6 @@ export default {
   overflow: hidden;
 }
 
-.color-chip:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 18px 30px rgba(0, 0, 0, 0.4);
-  border-color: rgba(255, 255, 255, 0.4);
-}
-
 .color-chip:disabled {
   cursor: not-allowed;
 }
@@ -544,22 +537,131 @@ export default {
   transition: transform 0.15s ease, border-color 0.2s ease;
 }
 
-.modal-actions button:hover {
-  transform: translateY(-1px);
-  border-color: rgba(255, 255, 255, 0.45);
-}
-
 .modal-actions .cancel {
   background: transparent;
 }
 
 @media (max-width: 900px) {
+  .login-container {
+    min-height: auto;
+    align-items: flex-start;
+    padding: calc(92px + env(safe-area-inset-top)) 5vw
+      max(34px, env(safe-area-inset-bottom));
+  }
+
   .hero {
     grid-template-columns: 1fr;
+    gap: 20px;
   }
 
   .panel {
     width: 100%;
   }
 }
+
+@media (max-width: 640px) {
+  .admin-button {
+    top: 12px;
+    right: 12px;
+    padding: 8px 12px;
+    font-size: 0.72rem;
+    letter-spacing: 0.4px;
+  }
+
+  .hero-copy {
+    gap: 14px;
+  }
+
+  .hero-copy h1 {
+    font-size: clamp(1.8rem, 9vw, 2.4rem);
+    line-height: 1.1;
+  }
+
+  .lead {
+    font-size: 0.95rem;
+  }
+
+  .stats {
+    gap: 10px;
+  }
+
+  .stat {
+    min-width: 0;
+    flex: 1 1 130px;
+    padding: 10px 12px;
+  }
+
+  .panel {
+    padding: 18px;
+    border-radius: 18px;
+    gap: 14px;
+  }
+
+  .palette {
+    grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+    gap: 10px;
+    min-height: 0;
+  }
+
+  .color-chip {
+    border-radius: 14px;
+  }
+
+  .chip-core {
+    inset: 10px;
+    border-radius: 10px;
+  }
+
+  .panel-footer {
+    font-size: 0.8rem;
+  }
+
+  .modal {
+    padding: 20px;
+    width: min(360px, calc(100vw - 24px));
+  }
+}
+
+@media (max-width: 420px) {
+  .login-container {
+    padding: calc(78px + env(safe-area-inset-top)) 4vw
+      max(24px, env(safe-area-inset-bottom));
+  }
+
+  .eyebrow {
+    font-size: 0.75rem;
+    letter-spacing: 1.6px;
+  }
+
+  .panel-header h2 {
+    font-size: 1rem;
+  }
+
+  .panel-header p {
+    font-size: 0.82rem;
+  }
+
+  .modal-actions {
+    flex-direction: column;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .admin-button:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.5);
+  }
+
+  .color-chip:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 18px 30px rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.4);
+  }
+
+  .modal-actions button:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.45);
+  }
+}
+
 </style>

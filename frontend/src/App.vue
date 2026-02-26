@@ -200,7 +200,7 @@ export default {
       this.gamePollTimer = null
     },
 
-    async onGeoSuccess(pos) {
+    onGeoSuccess(pos) {
       if (!this.userAlias) return
 
       const { latitude, longitude, accuracy } = pos.coords
@@ -229,13 +229,8 @@ export default {
       this.lastSentAt = now
       this.lastSentCoords = { lat: latitude, lon: longitude, accuracy }
 
-      // ✅ enviar por WS
-      const sentWs = this.live.sendLocation({ lat: latitude, lon: longitude, precision: accuracy })
-
-      // Fallback HTTP solo si el WS no está disponible
-      if (!sentWs) {
-        await this.sendLocationHttp({ lat: latitude, lon: longitude, precision: accuracy, ts: now })
-      }
+      // Enviar solo por WS/MQTT (sin fallback HTTP a /api/ubicacion-live)
+      this.live.sendLocation({ lat: latitude, lon: longitude, precision: accuracy })
     },
 
     onGeoError(err) {
@@ -303,24 +298,6 @@ export default {
         // ignore
       } finally {
         this.wakeLock = null
-      }
-    },
-
-    async sendLocationHttp({ lat, lon, precision, ts }) {
-      try {
-        await fetch('/api/ubicacion-live', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            alias: this.userAlias,
-            lat,
-            lon,
-            precision,
-            ts
-          })
-        })
-      } catch (e) {
-        console.warn('Error enviando ubicación HTTP:', e)
       }
     },
 

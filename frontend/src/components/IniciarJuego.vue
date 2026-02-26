@@ -101,6 +101,44 @@
               </button>
             </div>
           </div>
+
+          <div class="lab-group">
+            <div class="lab-title">Modo objetivo</div>
+
+            <div v-if="registeredPlayers.length" class="player-list">
+              <button
+                v-for="player in registeredPlayers"
+                :key="player.alias"
+                type="button"
+                class="player-item"
+                :class="{ selected: selectedPlayerAlias === player.alias }"
+                @click="selectPlayer(player.alias)"
+              >
+                <span class="player-dot" :style="{ backgroundColor: getPlayerColor(player.alias) }"></span>
+                <span class="player-name">{{ player.alias }}</span>
+                <span class="player-state" :class="{ offline: player.offline }">
+                  {{ player.offline ? 'sin señal' : 'activo' }}
+                </span>
+              </button>
+            </div>
+            <p v-else class="mini-note">No hay jugadores registrados todavía.</p>
+
+            <div class="panel-actions lab-actions">
+              <button
+                class="btn goto-user"
+                @click="gotoSelectedPlayer"
+                :disabled="gotoPlayerLoading || !droneConnected || !droneInAir || !selectedPlayer"
+                title="Enviar dron al jugador seleccionado"
+              >
+                🎯 Ir al jugador
+              </button>
+            </div>
+
+            <p v-if="selectedPlayer" class="mini-note">
+              Objetivo: {{ selectedPlayer.alias }} ·
+              {{ selectedPlayer.lat.toFixed(6) }}, {{ selectedPlayer.lon.toFixed(6) }}
+            </p>
+          </div>
         </div>
 
         <div class="gps-box" v-if="gpsAccuracy != null || adminPos">
@@ -154,11 +192,13 @@
     <p v-if="cameraLoading" class="subtitle">Activando cámara…</p>
     <p v-if="gpsLoading" class="subtitle">Consultando precisión…</p>
     <p v-if="gotoLoading" class="subtitle">Enviando GOTO…</p>
+    <p v-if="gotoPlayerLoading" class="subtitle">Enviando GOTO al jugador…</p>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="photoError" class="error">{{ photoError }}</p>
     <p v-if="landError" class="error">{{ landError }}</p>
     <p v-if="gpsError" class="error">{{ gpsError }}</p>
     <p v-if="gotoError" class="error">{{ gotoError }}</p>
+    <p v-if="gotoPlayerError" class="error">{{ gotoPlayerError }}</p>
 
     <div v-if="photoUrl" class="photo-panel">
       <h3>Última foto <span v-if="photoSource" class="photo-source">({{ photoSource }})</span></h3>
@@ -235,7 +275,12 @@ export default {
       adminAcc: null,
       adminCentered: false,
       gotoLoading: false,
-      gotoError: null
+      gotoError: null,
+
+      playersByAlias: {},
+      selectedPlayerAlias: null,
+      gotoPlayerLoading: false,
+      gotoPlayerError: null
     }
   },
 
@@ -246,6 +291,15 @@ export default {
         : this.cameraZoom === 'remote'
           ? 'zoom-remote'
           : 'zoom-none'
+    },
+    registeredPlayers() {
+      return Object.values(this.playersByAlias)
+        .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon))
+        .sort((a, b) => String(a.alias).localeCompare(String(b.alias)))
+    },
+    selectedPlayer() {
+      if (!this.selectedPlayerAlias) return null
+      return this.playersByAlias[this.selectedPlayerAlias] || null
     }
   },
 
@@ -529,6 +583,19 @@ export default {
         opacity: offline ? 0.2 : 1,
         fillOpacity: offline ? 0.05 : 0.15
       })
+
+      this.playersByAlias[alias] = {
+        alias,
+        lat,
+        lon,
+        precision: Number.isFinite(precision) ? precision : null,
+        ts: Number.isFinite(ts) ? ts : null,
+        offline
+      }
+
+      if (!this.selectedPlayerAlias) {
+        this.selectedPlayerAlias = alias
+      }
     },
 
     clearMarkers() {
@@ -537,6 +604,9 @@ export default {
         try { acc.remove() } catch (e) { console.warn("Error", e) }
       })
       this.markers = {}
+      this.playersByAlias = {}
+      this.selectedPlayerAlias = null
+      this.gotoPlayerError = null
     },
 
     clearAdminLocation() {
@@ -934,15 +1004,54 @@ export default {
       }
       this.gotoLoading = true
       try {
-        await this.mqttPublish(this.mqttTopics.goto, JSON.stringify({
-          lat: this.adminPos.lat,
-          lon: this.adminPos.lon,
-          h: Number(this.takeoffAlt)
-        }))
+        await this.publishGoto(this.adminPos.lat, this.adminPos.lon)
       } catch (e) {
         this.gotoError = e.message || 'Error enviando GOTO'
       } finally {
         this.gotoLoading = false
+      }
+    },
+
+    getPlayerColor(alias) {
+      const raw = String(alias || '').trim()
+      if (!raw) return '#6b7280'
+      if (typeof CSS !== 'undefined' && typeof CSS.supports === 'function') {
+        if (CSS.supports('color', raw)) return raw
+      }
+      return '#6b7280'
+    },
+
+    selectPlayer(alias) {
+      this.selectedPlayerAlias = alias
+      this.gotoPlayerError = null
+    },
+
+    async publishGoto(lat, lon) {
+      const targetLat = Number(lat)
+      const targetLon = Number(lon)
+      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) {
+        throw new Error('Coordenadas de destino inválidas')
+      }
+      await this.mqttPublish(this.mqttTopics.goto, JSON.stringify({
+        lat: targetLat,
+        lon: targetLon,
+        h: Number(this.takeoffAlt)
+      }))
+    },
+
+    async gotoSelectedPlayer() {
+      this.gotoPlayerError = null
+      if (!this.selectedPlayer) {
+        this.gotoPlayerError = 'Selecciona un jugador para enviar el dron'
+        return
+      }
+      this.gotoPlayerLoading = true
+      try {
+        await this.publishGoto(this.selectedPlayer.lat, this.selectedPlayer.lon)
+      } catch (e) {
+        this.gotoPlayerError = e.message || 'Error enviando GOTO al jugador'
+      } finally {
+        this.gotoPlayerLoading = false
       }
     }
   }
@@ -1026,7 +1135,7 @@ export default {
 
 .lab-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
 }
 
@@ -1299,6 +1408,11 @@ export default {
   color: #0b1b3a;
 }
 
+.btn.goto-user {
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: #411f00;
+}
+
 .btn.start:hover:not(:disabled),
 .btn.photo:hover:not(:disabled),
 .btn.stop:hover {
@@ -1312,6 +1426,64 @@ export default {
 .btn.takeoff:hover:not(:disabled),
 .btn.goto:hover:not(:disabled) {
   transform: translateY(-2px);
+}
+
+.btn.goto-user:hover:not(:disabled) {
+  transform: translateY(-2px);
+}
+
+.player-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.player-item {
+  width: 100%;
+  border: 1px solid #2b2b2b;
+  background: #0f0f0f;
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  color: #dfdfdf;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.player-item:hover {
+  border-color: #3f3f3f;
+  transform: translateY(-1px);
+}
+
+.player-item.selected {
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35);
+}
+
+.player-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+.player-name {
+  font-size: 0.85rem;
+  text-transform: capitalize;
+}
+
+.player-state {
+  font-size: 0.75rem;
+  color: #86efac;
+}
+
+.player-state.offline {
+  color: #fca5a5;
 }
 
 .error {
