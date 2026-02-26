@@ -48,6 +48,9 @@
         <p v-if="telemetryAlt !== null" class="mini-note">
           Altitud telemetría: {{ telemetryAlt }} m
           <span v-if="lastDroneState">· {{ lastDroneState }}</span>
+          <span v-if="telemetryLat !== null && telemetryLon !== null">
+            · Dron: {{ telemetryLat.toFixed(6) }}, {{ telemetryLon.toFixed(6) }}
+          </span>
         </p>
 
         <div class="lab-grid">
@@ -242,7 +245,12 @@ export default {
         goto: (process.env.VUE_APP_MQTT_TOPIC_GOTO || 'mobileFlask/demoDash/GoTo').trim()
       },
       telemetryAlt: null,
+      telemetryLat: null,
+      telemetryLon: null,
       lastDroneState: null,
+      dronePos: null,
+      droneMarker: null,
+      droneAcc: null,
 
       photoUrl: null,
       photoLoading: false,
@@ -328,6 +336,7 @@ export default {
     this.disconnectMqtt()
     this.live?.disconnect()
     this.stopPollingFallback()
+    this.clearDroneLocation()
     if (this.map) {
       this.map.remove()
       this.map = null
@@ -419,6 +428,19 @@ export default {
         this.telemetryAlt = alt
       }
 
+      const telemetryLoc = this.extractTelemetryLocation(data)
+      if (telemetryLoc) {
+        this.telemetryLat = telemetryLoc.lat
+        this.telemetryLon = telemetryLoc.lon
+        this.dronePos = {
+          lat: telemetryLoc.lat,
+          lon: telemetryLoc.lon,
+          precision: telemetryLoc.precision,
+          ts: Date.now()
+        }
+        this.updateDroneLocation(telemetryLoc.lat, telemetryLoc.lon, telemetryLoc.precision)
+      }
+
       const state = String(data?.state || '').trim().toLowerCase()
       if (!state) return
 
@@ -448,7 +470,7 @@ export default {
         if (!msg) return
 
         if (msg.type === 'snapshot' && Array.isArray(msg.players)) {
-          msg.players.forEach(p => this.upsertPlayer(p))
+          this.applyPlayersSnapshot(msg.players)
         }
 
         if (msg.type === 'player_update' && msg.player) {
@@ -512,6 +534,9 @@ export default {
 
         this.$nextTick(() => this.map?.invalidateSize(true))
         this.mapReady = true
+        if (this.dronePos) {
+          this.updateDroneLocation(this.dronePos.lat, this.dronePos.lon, this.dronePos.precision)
+        }
       }
 
       if (!navigator.geolocation) return start(fallbackLat, fallbackLon)
@@ -598,15 +623,186 @@ export default {
       }
     },
 
-    clearMarkers() {
-      Object.values(this.markers).forEach(({ dot, acc }) => {
-        try { dot.remove() } catch (e) { console.warn("Error", e)}
-        try { acc.remove() } catch (e) { console.warn("Error", e) }
+    removePlayer(alias) {
+      const key = String(alias || '')
+      if (!key) return
+
+      const layers = this.markers[key]
+      if (layers) {
+        try { layers.dot.remove() } catch (e) { console.warn('Error', e) }
+        try { layers.acc.remove() } catch (e) { console.warn('Error', e) }
+        delete this.markers[key]
+      }
+
+      if (this.playersByAlias[key]) {
+        delete this.playersByAlias[key]
+      }
+
+      if (this.selectedPlayerAlias === key) {
+        this.selectedPlayerAlias = null
+      }
+    },
+
+    applyPlayersSnapshot(players) {
+      const present = new Set()
+      if (Array.isArray(players)) {
+        players.forEach((p) => {
+          if (!p || !p.alias || p.lat == null || p.lon == null) return
+          const lat = Number(p.lat)
+          const lon = Number(p.lon)
+          if (Number.isNaN(lat) || Number.isNaN(lon)) return
+          const alias = String(p.alias)
+          present.add(alias)
+          this.upsertPlayer({ ...p, alias, lat, lon })
+        })
+      }
+
+      Object.keys(this.playersByAlias).forEach((alias) => {
+        if (!present.has(alias)) {
+          this.removePlayer(alias)
+        }
       })
+
+      if (!this.selectedPlayerAlias) {
+        const first = Object.keys(this.playersByAlias)
+          .sort((a, b) => a.localeCompare(b))[0] || null
+        this.selectedPlayerAlias = first
+      }
+    },
+
+    clearMarkers() {
+      Object.keys(this.playersByAlias).forEach((alias) => this.removePlayer(alias))
       this.markers = {}
       this.playersByAlias = {}
       this.selectedPlayerAlias = null
       this.gotoPlayerError = null
+    },
+
+    parseTelemetryNumber(value) {
+      if (value == null) return null
+      if (typeof value === 'string') {
+        const normalized = value.trim().replace(',', '.')
+        if (!normalized) return null
+        const parsed = Number(normalized)
+        return Number.isFinite(parsed) ? parsed : null
+      }
+      const n = Number(value)
+      return Number.isFinite(n) ? n : null
+    },
+
+    readTelemetryNumber(data, paths) {
+      if (!data || !Array.isArray(paths)) return null
+      for (const path of paths) {
+        let cur = data
+        let missing = false
+        for (const key of path) {
+          if (cur == null || typeof cur !== 'object' || !(key in cur)) {
+            missing = true
+            break
+          }
+          cur = cur[key]
+        }
+        if (missing) continue
+        const n = this.parseTelemetryNumber(cur)
+        if (Number.isFinite(n)) return n
+      }
+      return null
+    },
+
+    extractTelemetryLocation(data) {
+      const lat = this.readTelemetryNumber(data, [
+        ['lat'],
+        ['latitude'],
+        ['gps', 'lat'],
+        ['gps', 'latitude'],
+        ['position', 'lat'],
+        ['position', 'latitude'],
+        ['location', 'lat'],
+        ['location', 'latitude']
+      ])
+      const lon = this.readTelemetryNumber(data, [
+        ['lon'],
+        ['lng'],
+        ['longitude'],
+        ['gps', 'lon'],
+        ['gps', 'lng'],
+        ['gps', 'longitude'],
+        ['position', 'lon'],
+        ['position', 'lng'],
+        ['position', 'longitude'],
+        ['location', 'lon'],
+        ['location', 'lng'],
+        ['location', 'longitude']
+      ])
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+      if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
+
+      const precision = this.readTelemetryNumber(data, [
+        ['precision'],
+        ['accuracy'],
+        ['gps', 'precision'],
+        ['gps', 'accuracy'],
+        ['position', 'precision'],
+        ['position', 'accuracy'],
+        ['location', 'precision'],
+        ['location', 'accuracy']
+      ])
+
+      return {
+        lat,
+        lon,
+        precision: Number.isFinite(precision) ? precision : null
+      }
+    },
+
+    ensureDroneLayers(latlng, accuracy) {
+      if (!this.mapReady || !this.map) return
+      if (!this.droneMarker) {
+        this.droneMarker = L.circleMarker(latlng, {
+          radius: 8,
+          weight: 2,
+          color: '#111111',
+          fillColor: '#ff9800',
+          fillOpacity: 0.95
+        }).addTo(this.map).bindPopup('Dron')
+      }
+      if (!this.droneAcc) {
+        this.droneAcc = L.circle(latlng, {
+          radius: Number.isFinite(accuracy) && accuracy > 0 ? Math.min(accuracy, 80) : 8,
+          weight: 1,
+          color: '#ff9800',
+          fillColor: '#ff9800',
+          fillOpacity: 0.08
+        }).addTo(this.map)
+      }
+    },
+
+    updateDroneLocation(lat, lon, accuracy) {
+      if (!this.mapReady || !this.map) return
+      const latNum = Number(lat)
+      const lonNum = Number(lon)
+      if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return
+      const latlng = [latNum, lonNum]
+      this.ensureDroneLayers(latlng, accuracy)
+      if (this.droneMarker) this.droneMarker.setLatLng(latlng)
+      if (this.droneAcc) this.droneAcc.setLatLng(latlng)
+      if (this.droneAcc && Number.isFinite(accuracy) && accuracy > 0) {
+        this.droneAcc.setRadius(Math.min(accuracy, 80))
+      }
+    },
+
+    clearDroneLocation() {
+      if (this.droneMarker) {
+        try { this.droneMarker.remove() } catch (e) { console.warn('Error', e) }
+      }
+      if (this.droneAcc) {
+        try { this.droneAcc.remove() } catch (e) { console.warn('Error', e) }
+      }
+      this.droneMarker = null
+      this.droneAcc = null
+      this.dronePos = null
+      this.telemetryLat = null
+      this.telemetryLon = null
     },
 
     clearAdminLocation() {
@@ -640,7 +836,7 @@ export default {
           if (!res.ok) return
           const players = await res.json()
           if (Array.isArray(players)) {
-            players.forEach(p => this.upsertPlayer(p))
+            this.applyPlayersSnapshot(players)
           }
         } catch (e) {
           try {
@@ -648,7 +844,7 @@ export default {
             if (!res.ok) return
             const players = await res.json()
             if (Array.isArray(players)) {
-              players.forEach(p => this.upsertPlayer(p))
+              this.applyPlayersSnapshot(players)
             }
           } catch (err) {
             console.warn('Error polling jugadores:', err)
@@ -705,6 +901,7 @@ export default {
         this.live.reset()
         this.clearMarkers()
         this.clearAdminLocation()
+        this.clearDroneLocation()
       } catch {
         this.error = 'Error al parar el juego'
       }

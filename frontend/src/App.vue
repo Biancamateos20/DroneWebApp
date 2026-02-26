@@ -302,7 +302,9 @@ export default {
     },
 
     registerPlayerHttp() {
-      if (!this.userAlias || !('geolocation' in navigator)) return
+      const alias = this.userAlias
+      if (!alias || !('geolocation' in navigator)) return
+      const playerId = this.live?.session?.playerId
       navigator.geolocation.getCurrentPosition(
         async (pos) => {
           const lat = Number(pos.coords.latitude)
@@ -313,9 +315,11 @@ export default {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                alias: this.userAlias,
+                alias,
+                playerId,
                 lat,
-                lon
+                lon,
+                ts: Date.now()
               })
             })
           } catch (e) {

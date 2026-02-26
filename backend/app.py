@@ -11,6 +11,7 @@ CORS(app)
 VM_IP = "192.168.64.2"
 VM_PORT = 5002
 VM_BASE_URL = f"http://{VM_IP}:{VM_PORT}"
+VM_HTTP_PROXY_ENABLED = os.getenv("VM_HTTP_PROXY_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "http://127.0.0.1:8080")
 
@@ -20,6 +21,7 @@ juego_en_curso = False
 jugadores = []
 game_start_id = 0
 reset_id = 0
+player_alias_by_id = {}
 
 
 @app.route("/Hello", methods=['GET'])
@@ -36,34 +38,80 @@ def registrar_jugador():
     lat = data.get("lat")
     lon = data.get("lon")
     alias = data.get("alias")
+    raw_player_id = data.get("playerId", data.get("player_id"))
+    player_id = None
+    if raw_player_id is not None:
+        player_id = str(raw_player_id).strip() or None
 
     if lat is None or lon is None or alias is None:
         return jsonify({"error": "Datos incompletos"}), 400
 
-    if alias in colores_ocupados:
-        return jsonify({"error": "Color ya ocupado"}), 400
+    alias = str(alias).strip()
+    if not alias:
+        return jsonify({"error": "Alias inválido"}), 400
 
-    colores_ocupados.add(alias)
-    jugadores.append({"lat": lat, "lon": lon, "alias": alias})
+    if player_id:
+        prev_alias = player_alias_by_id.get(player_id)
+        if prev_alias and prev_alias != alias:
+            colores_ocupados.discard(prev_alias)
+            jugadores[:] = [j for j in jugadores if j.get("alias") != prev_alias]
+            print(f"Liberado alias previo ({prev_alias}) para playerId={player_id}")
+
+    existing = None
+    for j in jugadores:
+        if j.get("alias") == alias:
+            existing = j
+            break
+
+    if existing is not None:
+        existing_player_id = existing.get("playerId")
+        existing_player_id = str(existing_player_id).strip() if existing_player_id is not None else None
+        if existing_player_id and existing_player_id != player_id:
+            return jsonify({"error": "Color ya ocupado"}), 400
+        if existing_player_id is None and player_id is None and alias in colores_ocupados:
+            return jsonify({"error": "Color ya ocupado"}), 400
+
+        existing["lat"] = lat
+        existing["lon"] = lon
+        if player_id:
+            existing["playerId"] = player_id
+            player_alias_by_id[player_id] = alias
+        colores_ocupados.add(alias)
+        created_new = False
+    else:
+        if alias in colores_ocupados:
+            return jsonify({"error": "Color ya ocupado"}), 400
+        payload = {"lat": lat, "lon": lon, "alias": alias}
+        if player_id:
+            payload["playerId"] = player_id
+            player_alias_by_id[player_id] = alias
+        colores_ocupados.add(alias)
+        jugadores.append(payload)
+        created_new = True
+
     print(f"Jugador registrado (proxy) → {alias} ({lat}, {lon})")
 
-    try:
-        requests.post(
-            f"{VM_BASE_URL}/jugador",
-            json={"lat": lat, "lon": lon, "alias": alias},
-            timeout=3
-        )
-    except Exception as e:
-        print("Error comunicando con la VM:", e)
+    if VM_HTTP_PROXY_ENABLED:
+        try:
+            requests.post(
+                f"{VM_BASE_URL}/jugador",
+                json={"lat": lat, "lon": lon, "alias": alias, "playerId": player_id},
+                timeout=3
+            )
+        except Exception as e:
+            print("Error comunicando con la VM:", e)
 
-        colores_ocupados.discard(alias)
-        jugadores[:] = [j for j in jugadores if j.get("alias") != alias]
-
-        return jsonify({"error": "Error comunicando con la VM"}), 500
+            if created_new:
+                colores_ocupados.discard(alias)
+                jugadores[:] = [j for j in jugadores if j.get("alias") != alias]
+                if player_id and player_alias_by_id.get(player_id) == alias:
+                    player_alias_by_id.pop(player_id, None)
+            return jsonify({"error": "Error comunicando con la VM"}), 500
 
     return jsonify({
         "status": "ok",
-        "colores_ocupados": list(colores_ocupados)
+        "colores_ocupados": list(colores_ocupados),
+        "forwarded_vm": VM_HTTP_PROXY_ENABLED
     }), 200
 
 
@@ -99,14 +147,15 @@ def ubicacion_live():
         if not found:
             jugadores.append({"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts})
 
-    try:
-        requests.post(
-            f"{VM_BASE_URL}/ubicacion-live",
-            json={"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts},
-            timeout=2
-        )
-    except Exception as e:
-        print("Error enviando ubicación live a la VM:", e)
+    if VM_HTTP_PROXY_ENABLED:
+        try:
+            requests.post(
+                f"{VM_BASE_URL}/ubicacion-live",
+                json={"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts},
+                timeout=2
+            )
+        except Exception as e:
+            print("Error enviando ubicación live a la VM:", e)
 
     return jsonify({"status": "ok"}), 200
 
@@ -133,12 +182,20 @@ def iniciar_juego():
         juego_en_curso = True
         game_start_id += 1
 
-        resp = requests.post(
-            f"{VM_BASE_URL}/iniciar-juego",
-            json={"jugadores": jugadores},
-            timeout=3
-        )
-        return jsonify(resp.json()), resp.status_code
+        if VM_HTTP_PROXY_ENABLED:
+            resp = requests.post(
+                f"{VM_BASE_URL}/iniciar-juego",
+                json={"jugadores": jugadores},
+                timeout=3
+            )
+            return jsonify(resp.json()), resp.status_code
+
+        return jsonify({
+            "status": "ok",
+            "juego_en_curso": juego_en_curso,
+            "game_start_id": game_start_id,
+            "forwarded_vm": False
+        }), 200
     except Exception as e:
         print("❌ Error iniciar juego:", e)
         return jsonify({"error": "Error iniciando juego en VM", "warning": True}), 500
@@ -147,18 +204,20 @@ def iniciar_juego():
 @app.route("/reset", methods=["POST"])
 def reset():
     # Reinicia el estado local y solicita reset en la VM.
-    global juego_en_curso, colores_ocupados, jugadores, reset_id
+    global juego_en_curso, colores_ocupados, jugadores, reset_id, player_alias_by_id
 
     colores_ocupados.clear()
     jugadores.clear()
+    player_alias_by_id.clear()
     juego_en_curso = False
     reset_id += 1
     print("Juego reseteado (proxy)")
 
-    try:
-        requests.post(f"{VM_BASE_URL}/reset", timeout=3)
-    except Exception as e:
-        print("⚠️ No se pudo resetear VM (continuo igual):", e)
+    if VM_HTTP_PROXY_ENABLED:
+        try:
+            requests.post(f"{VM_BASE_URL}/reset", timeout=3)
+        except Exception as e:
+            print("⚠️ No se pudo resetear VM (continuo igual):", e)
 
     return jsonify({"status": "reset ok", "reset_id": reset_id}), 200
 

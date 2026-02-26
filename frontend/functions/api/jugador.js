@@ -10,6 +10,11 @@ function getStore() {
   return globalThis.__players;
 }
 
+function getPlayerAliasMap() {
+  if (!globalThis.__playerAliasById) globalThis.__playerAliasById = new Map();
+  return globalThis.__playerAliasById;
+}
+
 export async function onRequest(context) {
   const { request } = context;
 
@@ -29,12 +34,42 @@ export async function onRequest(context) {
     });
   }
 
+  const alias = String(data.alias || "").trim();
+  if (!alias) {
+    return new Response(JSON.stringify({ error: "Alias inválido" }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  const rawPlayerId = data.playerId ?? data.player_id ?? null;
+  const playerId = rawPlayerId == null ? null : (String(rawPlayerId).trim() || null);
+
   const store = getStore();
-  const prev = store.get(data.alias) || { alias: data.alias };
+  const playerAlias = getPlayerAliasMap();
+
+  if (playerId) {
+    const prevAlias = playerAlias.get(playerId);
+    if (prevAlias && prevAlias !== alias) {
+      store.delete(prevAlias);
+    }
+  }
+
+  const existing = store.get(alias) || null;
+  const existingPlayerId = existing?.playerId == null ? null : (String(existing.playerId).trim() || null);
+  if (existing && existingPlayerId && existingPlayerId !== playerId) {
+    return new Response(JSON.stringify({ error: "Color ya ocupado" }), {
+      status: 409,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  const prev = existing || { alias };
 
   const jugador = {
     ...prev,
-    alias: data.alias,
+    alias,
+    playerId: playerId ?? prev.playerId ?? null,
     lat: data.lat ?? prev.lat ?? null,
     lon: data.lon ?? prev.lon ?? null,
     precision: data.precision ?? prev.precision ?? null,
@@ -42,7 +77,10 @@ export async function onRequest(context) {
     updatedAt: Date.now(),
   };
 
-  store.set(data.alias, jugador);
+  store.set(alias, jugador);
+  if (playerId) {
+    playerAlias.set(playerId, alias);
+  }
 
   return new Response(JSON.stringify({ ok: true, jugador }), {
     status: 200,

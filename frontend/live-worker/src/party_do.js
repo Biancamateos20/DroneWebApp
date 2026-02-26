@@ -6,7 +6,7 @@ export class PartyDO {
     this.INACTIVITY_MS = 30 * 60 * 1000;
 
     this.sockets = new Map();   // connId -> WebSocket
-    this.connMeta = new Map();  // connId -> { role, alias, playerId }
+    this.connMeta = new Map();  // connId -> { role, alias, playerId, joinResetId }
 
     this.players = new Map();   // alias -> {alias, lat, lon, precision, ts, ...}
     this.gameState = { juego_en_curso: false, reset_id: 0, game_start_id: 0 };
@@ -119,7 +119,13 @@ export class PartyDO {
     const alias = data.alias ? String(data.alias) : null;
     const playerId = data.playerId ? String(data.playerId) : null;
 
-    this.connMeta.set(connId, { role, alias, playerId });
+    this.connMeta.set(connId, {
+      role,
+      alias,
+      playerId,
+      // Solo aceptamos loc de conexiones que se unieron tras el último reset.
+      joinResetId: this.gameState.reset_id,
+    });
 
     const ws = this.sockets.get(connId);
     if (!ws) return;
@@ -138,6 +144,7 @@ export class PartyDO {
     this.maybeAutoReset();
     const meta = this.connMeta.get(connId);
     if (!meta || meta.role !== "player") return;
+    if (Number(meta.joinResetId ?? -1) !== Number(this.gameState.reset_id)) return;
 
     const alias = meta.alias || (data.alias ? String(data.alias) : null);
     if (!alias) return;
