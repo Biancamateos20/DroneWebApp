@@ -78,12 +78,28 @@
     <div class="modal">
       <h2>Acceso Administrador</h2>
 
-      <input v-model="adminPassword" type="password" placeholder="Contraseña" />
+      <form class="admin-form" @submit.prevent="adminLogin" @keydown.enter.prevent="triggerAdminEnter">
+        <div class="admin-pass-wrap">
+          <input
+            v-model="adminPassword"
+            :type="adminPasswordVisible ? 'text' : 'password'"
+            placeholder="Contraseña"
+            @keydown.enter.prevent="triggerAdminEnter"
+          />
+          <button
+            type="button"
+            class="toggle-pass"
+            @click="adminPasswordVisible = !adminPasswordVisible"
+          >
+            {{ adminPasswordVisible ? 'Ocultar' : 'Ver' }}
+          </button>
+        </div>
 
-      <div class="modal-actions">
-        <button type="button" @click="adminLogin">Entrar</button>
-        <button type="button" class="cancel" @click="showAdmin = false">Cancelar</button>
-      </div>
+        <div class="modal-actions">
+          <button ref="adminEnterBtn" type="submit">Entrar</button>
+          <button type="button" class="cancel" @click="showAdmin = false">Cancelar</button>
+        </div>
+      </form>
 
       <p v-if="adminError" class="error">{{ adminError }}</p>
     </div>
@@ -103,6 +119,7 @@ export default {
 
       showAdmin: false,
       adminPassword: '',
+      adminPasswordVisible: false,
       adminError: null,
 
       colors: [
@@ -228,6 +245,15 @@ export default {
       }
       this.showAdmin = false
       this.$emit('admin-login')
+    },
+
+    triggerAdminEnter() {
+      const btn = this.$refs.adminEnterBtn
+      if (btn && typeof btn.click === 'function') {
+        btn.click()
+        return
+      }
+      this.adminLogin()
     }
   }
 }
@@ -509,10 +535,21 @@ export default {
   margin: 0 0 8px;
 }
 
-.modal input {
+.admin-form {
+  margin-top: 10px;
+}
+
+.admin-pass-wrap {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.admin-pass-wrap input {
   width: 100%;
   padding: 12px 14px;
-  margin-top: 10px;
   background: rgba(4, 6, 10, 0.8);
   color: #fff;
   border: 1px solid rgba(255, 255, 255, 0.2);
@@ -520,10 +557,22 @@ export default {
   font-size: 0.95rem;
 }
 
+.toggle-pass {
+  height: 100%;
+  min-width: 68px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(12, 17, 26, 0.9);
+  color: #f6f7fb;
+  cursor: pointer;
+}
+
 .modal-actions {
   display: flex;
   gap: 10px;
   margin-top: 18px;
+  width: 100%;
 }
 
 .modal-actions button {
@@ -620,6 +669,7 @@ export default {
     padding: 20px;
     width: min(360px, calc(100vw - 24px));
   }
+
 }
 
 @media (max-width: 420px) {
