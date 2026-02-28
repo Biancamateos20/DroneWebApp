@@ -29,8 +29,8 @@
           <label class="field">
             <span>Modo</span>
             <select v-model="droneMode">
-              <option value="sim">Simulación</option>
-              <option value="real">Real</option>
+              <option value="Simulacion">Simulación</option>
+              <option value="Real">Real</option>
             </select>
           </label>
 
@@ -259,7 +259,7 @@ export default {
       landLoading: false,
       landError: null,
 
-      droneMode: 'sim',
+      droneMode: 'Simulacion',
       droneConnected: false,
       connectLoading: false,
       droneInAir: false,
@@ -286,6 +286,7 @@ export default {
       gotoError: null,
 
       playersByAlias: {},
+      playerAnimations: {},
       selectedPlayerAlias: null,
       gotoPlayerLoading: false,
       gotoPlayerError: null
@@ -336,6 +337,7 @@ export default {
     this.disconnectMqtt()
     this.live?.disconnect()
     this.stopPollingFallback()
+    this.clearMarkers()
     this.clearDroneLocation()
     if (this.map) {
       this.map.remove()
@@ -411,6 +413,11 @@ export default {
           resolve()
         })
       })
+    },
+
+    buildConnectPayload() {
+      const mode = String(this.droneMode || '').trim().toLowerCase()
+      return mode === 'real' ? 'Real' : 'Simulacion'
     },
 
     handleMqttMessage(topic, message) {
@@ -574,6 +581,91 @@ export default {
       return this.markers[aliasColor]
     },
 
+    cancelPlayerAnimation(alias) {
+      const key = String(alias || '')
+      if (!key) return
+      const anim = this.playerAnimations[key]
+      if (!anim) return
+      if (anim.rafId && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(anim.rafId)
+      }
+      delete this.playerAnimations[key]
+    },
+
+    animatePlayerTo(alias, layers, lat, lon) {
+      if (!layers?.dot || !layers?.acc) return
+
+      const targetLat = Number(lat)
+      const targetLon = Number(lon)
+      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) return
+
+      const target = [targetLat, targetLon]
+      const current = layers.dot.getLatLng?.()
+      if (!current || !Number.isFinite(current.lat) || !Number.isFinite(current.lng)) {
+        layers.dot.setLatLng(target)
+        layers.acc.setLatLng(target)
+        return
+      }
+
+      if (typeof requestAnimationFrame !== 'function') {
+        layers.dot.setLatLng(target)
+        layers.acc.setLatLng(target)
+        return
+      }
+
+      const now = typeof performance !== 'undefined' && performance.now
+        ? performance.now()
+        : Date.now()
+
+      const prevAnim = this.playerAnimations[alias]
+      if (prevAnim?.rafId && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(prevAnim.rafId)
+      }
+
+      const fromLat = Number(current.lat)
+      const fromLon = Number(current.lng)
+      const deltaLat = targetLat - fromLat
+      const deltaLon = targetLon - fromLon
+
+      if (Math.abs(deltaLat) < 1e-8 && Math.abs(deltaLon) < 1e-8) {
+        layers.dot.setLatLng(target)
+        layers.acc.setLatLng(target)
+        this.playerAnimations[alias] = {
+          rafId: null,
+          lastUpdateAt: now
+        }
+        return
+      }
+
+      const elapsed = prevAnim?.lastUpdateAt ? now - prevAnim.lastUpdateAt : 280
+      const duration = Math.max(120, Math.min(520, elapsed * 1.1))
+      const easeOutCubic = t => 1 - ((1 - t) ** 3)
+
+      const anim = {
+        rafId: null,
+        lastUpdateAt: now
+      }
+      this.playerAnimations[alias] = anim
+
+      const step = (ts) => {
+        const progress = Math.min(1, (ts - now) / duration)
+        const eased = easeOutCubic(progress)
+        const curLat = fromLat + (deltaLat * eased)
+        const curLon = fromLon + (deltaLon * eased)
+        const curPos = [curLat, curLon]
+        layers.dot.setLatLng(curPos)
+        layers.acc.setLatLng(curPos)
+
+        if (progress < 1) {
+          anim.rafId = requestAnimationFrame(step)
+        } else {
+          anim.rafId = null
+        }
+      }
+
+      anim.rafId = requestAnimationFrame(step)
+    },
+
     upsertPlayer(p) {
       if (!this.mapReady || !this.map) return
       if (!p || !p.alias || p.lat == null || p.lon == null) return
@@ -593,8 +685,7 @@ export default {
       const pos = [lat, lon]
       const layers = this.ensurePlayerLayers(alias, pos)
 
-      layers.dot.setLatLng(pos)
-      layers.acc.setLatLng(pos)
+      this.animatePlayerTo(alias, layers, lat, lon)
 
       const capped = !Number.isNaN(precision) && precision > 0 ? Math.min(precision, 200) : 5
       layers.acc.setRadius(capped)
@@ -626,6 +717,8 @@ export default {
     removePlayer(alias) {
       const key = String(alias || '')
       if (!key) return
+
+      this.cancelPlayerAnimation(key)
 
       const layers = this.markers[key]
       if (layers) {
@@ -674,6 +767,7 @@ export default {
       Object.keys(this.playersByAlias).forEach((alias) => this.removePlayer(alias))
       this.markers = {}
       this.playersByAlias = {}
+      this.playerAnimations = {}
       this.selectedPlayerAlias = null
       this.gotoPlayerError = null
     },
@@ -850,7 +944,7 @@ export default {
             console.warn('Error polling jugadores:', err)
           }
         }
-      }, 2000)
+      }, 600)
     },
 
     stopPollingFallback() {
@@ -989,7 +1083,7 @@ export default {
           this.droneConnected = false
           this.droneInAir = false
         } else {
-          await this.mqttPublish(this.mqttTopics.connect)
+          await this.mqttPublish(this.mqttTopics.connect, this.buildConnectPayload())
           this.droneConnected = true
         }
       } catch (e) {

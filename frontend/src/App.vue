@@ -42,6 +42,8 @@ export default {
       gamePollTimer: null,
       lastSentAt: 0,
       lastSentCoords: null,
+      lastHttpLiveSentAt: 0,
+      httpLiveSending: false,
 
       lastStartId: null,
       lastResetId: null
@@ -164,6 +166,8 @@ export default {
       this.releaseWakeLock()
       this.lastSentAt = 0
       this.lastSentCoords = null
+      this.lastHttpLiveSentAt = 0
+      this.httpLiveSending = false
     },
 
     startGamePolling() {
@@ -229,8 +233,18 @@ export default {
       this.lastSentAt = now
       this.lastSentCoords = { lat: latitude, lon: longitude, accuracy }
 
-      // Enviar solo por WS/MQTT (sin fallback HTTP a /api/ubicacion-live)
-      this.live.sendLocation({ lat: latitude, lon: longitude, precision: accuracy })
+      const payload = {
+        lat: latitude,
+        lon: longitude,
+        precision: accuracy,
+        ts: now
+      }
+
+      // Preferimos WS para baja latencia y usamos HTTP como fallback.
+      const sentByWs = this.live.sendLocation(payload)
+      if (!sentByWs) {
+        this.sendLocationHttpFallback(payload)
+      }
     },
 
     onGeoError(err) {
@@ -333,6 +347,41 @@ export default {
       )
     },
 
+    sendLocationHttpFallback({ lat, lon, precision, ts }) {
+      if (!this.userAlias) return
+      const targetLat = Number(lat)
+      const targetLon = Number(lon)
+      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) return
+
+      const now = Date.now()
+      const MIN_HTTP_INTERVAL_MS = 350
+      if (this.lastHttpLiveSentAt && now - this.lastHttpLiveSentAt < MIN_HTTP_INTERVAL_MS) return
+      if (this.httpLiveSending && now - this.lastHttpLiveSentAt < 2000) return
+
+      this.lastHttpLiveSentAt = now
+      this.httpLiveSending = true
+
+      const playerId = this.live?.session?.playerId
+      fetch('/api/ubicacion-live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alias: this.userAlias,
+          playerId,
+          lat: targetLat,
+          lon: targetLon,
+          precision,
+          ts: Number.isFinite(ts) ? ts : now
+        })
+      })
+        .catch((e) => {
+          console.warn('Error enviando ubicación live por HTTP:', e)
+        })
+        .finally(() => {
+          this.httpLiveSending = false
+        })
+    },
+
     async syncGameStateOnJoin() {
       try {
         const res = await fetch('/api/estado-juego')
@@ -398,6 +447,8 @@ export default {
       this.userAlias = null
       this.lastSentAt = 0
       this.lastSentCoords = null
+      this.lastHttpLiveSentAt = 0
+      this.httpLiveSending = false
       try {
         localStorage.removeItem('player_session_v1')
       } catch (e) {
