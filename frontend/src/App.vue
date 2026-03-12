@@ -210,7 +210,6 @@ export default {
       const { latitude, longitude, accuracy } = pos.coords
       const now = Date.now()
 
-      // Ajustes: muy “Google Maps feel”
       const THROTTLE_MS = 250
       const FORCE_EVERY_MS = 1000
       const MIN_MOVE_M = 0.8

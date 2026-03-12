@@ -45,8 +45,9 @@
             </div>
           </div>
         </div>
-        <p v-if="telemetryAlt !== null" class="mini-note">
-          Altitud telemetría: {{ telemetryAlt }} m
+        <p v-if="telemetryAltDisplay !== null" class="mini-note">
+          Altitud telemetría: {{ telemetryAltDisplay.toFixed(3) }} m
+          <span v-if="telemetryAltitudeTrendText">· {{ telemetryAltitudeTrendText }}</span>
           <span v-if="lastDroneState">· {{ lastDroneState }}</span>
           <span v-if="telemetryLat !== null && telemetryLon !== null">
             · Dron: {{ telemetryLat.toFixed(6) }}, {{ telemetryLon.toFixed(6) }}
@@ -102,7 +103,33 @@
               <button class="btn info" @click="checkGpsPrecision" :disabled="gpsLoading">
                 📍 Ver precisión GPS
               </button>
+              <button v-if="!geofenceMode" class="btn geofence" @click="startGeofenceEdit">
+                🛡️ Editar geofence
+              </button>
+              <button v-else class="btn geofence" @click="stopGeofenceEdit">
+                ✅ Cerrar edición geofence
+              </button>
             </div>
+            <div v-if="geofenceMode" class="panel-actions lab-actions">
+              <button class="btn neutral" @click="clearGeofence" :disabled="!geofencePoints.length">
+                🧹 Limpiar geofence
+              </button>
+              <button
+                class="btn save"
+                @click="saveGeofence"
+                :disabled="geofencePoints.length < 3 || !geofenceDirty"
+              >
+                💾 Guardar geofence
+              </button>
+            </div>
+            <p v-if="geofenceMode || geofencePoints.length" class="mini-note">
+              Geofence: {{ geofencePoints.length }} puntos
+              <span v-if="geofencePoints.length >= 3">· polígono activo</span>
+              <span v-else>· añade al menos 3 puntos en el mapa</span>
+              <span v-if="geofenceDirty">· cambios sin guardar</span>
+            </p>
+            <p v-if="geofenceNotice" class="mini-note">{{ geofenceNotice }}</p>
+            <p v-if="geofenceError" class="mini-error">{{ geofenceError }}</p>
           </div>
 
           <div class="lab-group">
@@ -242,15 +269,23 @@ export default {
         disconnect: (process.env.VUE_APP_MQTT_TOPIC_DISCONNECT || 'mobileFlask/demoDash/disconnection').trim(),
         takeoff: (process.env.VUE_APP_MQTT_TOPIC_TAKEOFF || 'mobileFlask/demoDash/arm_takeOff').trim(),
         land: (process.env.VUE_APP_MQTT_TOPIC_LAND || 'mobileFlask/demoDash/Land').trim(),
-        goto: (process.env.VUE_APP_MQTT_TOPIC_GOTO || 'mobileFlask/demoDash/GoTo').trim()
+        goto: (process.env.VUE_APP_MQTT_TOPIC_GOTO || 'mobileFlask/demoDash/GoTo').trim(),
+        geofence: (process.env.VUE_APP_MQTT_TOPIC_GEOFENCE || 'mobileFlask/demoDash/setGeofence').trim()
       },
       telemetryAlt: null,
+      telemetryAltDisplay: null,
       telemetryLat: null,
       telemetryLon: null,
+      telemetryHeading: null,
+      telemetryVerticalSpeed: null,
+      droneAltTrend: 'stable',
+      lastTelemetryTs: null,
+      altitudeAnimation: null,
       lastDroneState: null,
       dronePos: null,
       droneMarker: null,
       droneAcc: null,
+      droneAnimation: null,
 
       photoUrl: null,
       photoLoading: false,
@@ -285,6 +320,16 @@ export default {
       gotoLoading: false,
       gotoError: null,
 
+      geofenceMode: false,
+      geofencePoints: [],
+      geofencePointMarkers: [],
+      geofencePreviewLine: null,
+      geofencePolygon: null,
+      geofenceMask: null,
+      geofenceDirty: false,
+      geofenceNotice: null,
+      geofenceError: null,
+
       playersByAlias: {},
       playerAnimations: {},
       selectedPlayerAlias: null,
@@ -309,6 +354,14 @@ export default {
     selectedPlayer() {
       if (!this.selectedPlayerAlias) return null
       return this.playersByAlias[this.selectedPlayerAlias] || null
+    },
+    telemetryAltitudeTrendText() {
+      if (!Number.isFinite(this.telemetryAltDisplay) || !this.droneAltTrend) return ''
+      const vs = Number(this.telemetryVerticalSpeed)
+      const speedText = Number.isFinite(vs) ? ` (${vs > 0 ? '+' : ''}${vs.toFixed(2)} m/s)` : ''
+      if (this.droneAltTrend === 'up') return `Subiendo${speedText}`
+      if (this.droneAltTrend === 'down') return `Bajando${speedText}`
+      return `Altitud estable${speedText}`
     }
   },
 
@@ -337,6 +390,8 @@ export default {
     this.disconnectMqtt()
     this.live?.disconnect()
     this.stopPollingFallback()
+    this.setGeofenceMode(false)
+    this.clearGeofence(true)
     this.clearMarkers()
     this.clearDroneLocation()
     if (this.map) {
@@ -420,19 +475,81 @@ export default {
       return mode === 'real' ? 'Real' : 'Simulacion'
     },
 
-    handleMqttMessage(topic, message) {
-      if (topic !== this.mqttTelemetryTopic) return
-      let data = null
+    isTelemetryTopic(topic) {
+      const received = String(topic || '').trim().toLowerCase()
+      if (!received) return false
+      const configured = String(this.mqttTelemetryTopic || '').trim().toLowerCase()
+      if (configured && received === configured) return true
+      return received === 'telemetryinfo' || received.endsWith('/telemetryinfo')
+    },
+
+    parseTelemetryPayload(message) {
+      const raw = (message == null ? '' : message.toString()).trim()
+      if (!raw) return null
+
       try {
-        data = JSON.parse(message.toString())
+        return JSON.parse(raw)
       } catch (e) {
-        console.warn('Mensaje telemetría inválido:', e)
+        // payload con prefijo: "Telemetria enviada: {...}"
+      }
+
+      const start = raw.indexOf('{')
+      const end = raw.lastIndexOf('}')
+      if (start >= 0 && end > start) {
+        const jsonCandidate = raw.slice(start, end + 1)
+        try {
+          return JSON.parse(jsonCandidate)
+        } catch (e) {
+          // formato python dict con comillas simples
+          try {
+            const normalized = jsonCandidate
+              .replace(/\bNone\b/g, 'null')
+              .replace(/\bTrue\b/g, 'true')
+              .replace(/\bFalse\b/g, 'false')
+              .replace(/'/g, '"')
+            return JSON.parse(normalized)
+          } catch (err) {
+            return null
+          }
+        }
+      }
+
+      return null
+    },
+
+    handleMqttMessage(topic, message) {
+      if (!this.isTelemetryTopic(topic)) return
+      const data = this.parseTelemetryPayload(message)
+      if (!data || typeof data !== 'object') {
+        console.warn('Mensaje telemetría inválido (no parseable):', message?.toString?.())
         return
       }
 
-      const alt = Number(data?.alt)
+      const alt = this.readTelemetryNumber(data, [
+        ['alt'],
+        ['altitude'],
+        ['relative_alt'],
+        ['gps', 'alt'],
+        ['gps', 'altitude'],
+        ['position', 'alt'],
+        ['position', 'altitude'],
+        ['location', 'alt'],
+        ['location', 'altitude']
+      ])
+      const now = Date.now()
       if (Number.isFinite(alt)) {
-        this.telemetryAlt = alt
+        this.updateAltitudeTrend(alt, now)
+      }
+
+      const heading = this.readTelemetryNumber(data, [
+        ['heading'],
+        ['yaw'],
+        ['attitude', 'yaw'],
+        ['navigation', 'heading'],
+        ['navigation', 'yaw']
+      ])
+      if (Number.isFinite(heading)) {
+        this.telemetryHeading = ((heading % 360) + 360) % 360
       }
 
       const telemetryLoc = this.extractTelemetryLocation(data)
@@ -443,31 +560,171 @@ export default {
           lat: telemetryLoc.lat,
           lon: telemetryLoc.lon,
           precision: telemetryLoc.precision,
-          ts: Date.now()
+          alt: Number.isFinite(this.telemetryAlt) ? this.telemetryAlt : null,
+          heading: Number.isFinite(this.telemetryHeading) ? this.telemetryHeading : null,
+          trend: this.droneAltTrend,
+          ts: now
         }
-        this.updateDroneLocation(telemetryLoc.lat, telemetryLoc.lon, telemetryLoc.precision)
+        this.updateDroneLocation(telemetryLoc.lat, telemetryLoc.lon, telemetryLoc.precision, now)
       }
+
+      this.updateDroneMarkerVisuals()
 
       const state = String(data?.state || '').trim().toLowerCase()
-      if (!state) return
+      const ALT_LANDED_THRESHOLD = 0.05
+      const ALT_AIRBORNE_THRESHOLD = 0.25
+      const altIndicatesLanded = Number.isFinite(this.telemetryAlt) && this.telemetryAlt <= ALT_LANDED_THRESHOLD
+      const altIndicatesAirborne = Number.isFinite(this.telemetryAlt) && this.telemetryAlt >= ALT_AIRBORNE_THRESHOLD
 
-      this.lastDroneState = state
-      if (['flying', 'takingoff', 'hovering', 'airborne'].includes(state)) {
-        this.droneConnected = true
+      if (state) {
+        this.lastDroneState = state
+        if (['flying', 'takingoff', 'hovering', 'airborne'].includes(state)) {
+          this.droneConnected = true
+          this.droneInAir = true
+        } else if (['landed', 'landing', 'ready', 'idle'].includes(state)) {
+          this.droneConnected = true
+          this.droneInAir = false
+        } else if (['disconnected', 'offline'].includes(state)) {
+          this.droneConnected = false
+          this.droneInAir = false
+        } else {
+          this.droneConnected = true
+        }
+      }
+
+      // Si la telemetría marca altitud 0 (o casi 0), forzamos estado en tierra.
+      if (altIndicatesLanded) {
+        this.droneInAir = false
+      } else if (altIndicatesAirborne) {
+        // Si la altitud sube claramente, marcamos en vuelo aunque el estado tarde en llegar.
         this.droneInAir = true
+      }
+    },
+
+    cancelAltitudeAnimation() {
+      if (!this.altitudeAnimation) return
+      if (this.altitudeAnimation.rafId && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(this.altitudeAnimation.rafId)
+      }
+      this.altitudeAnimation = null
+    },
+
+    queueAltitudeAnimation(targetAlt, sampleIntervalMs = 1000) {
+      const target = Number(targetAlt)
+      if (!Number.isFinite(target)) return
+
+      if (typeof requestAnimationFrame !== 'function') {
+        this.telemetryAltDisplay = target
+        this.updateDroneMarkerVisuals()
         return
       }
-      if (['landed', 'landing', 'ready', 'idle'].includes(state)) {
-        this.droneConnected = true
-        this.droneInAir = false
-        return
+
+      if (!this.altitudeAnimation) {
+        this.altitudeAnimation = {
+          rafId: null,
+          segmentStartAt: null,
+          segmentDurationMs: 1000,
+          fromAlt: target,
+          toAlt: target,
+          renderAlt: target
+        }
       }
-      if (['disconnected', 'offline'].includes(state)) {
-        this.droneConnected = false
-        this.droneInAir = false
-        return
+
+      const nowPerf = typeof performance !== 'undefined' && performance.now
+        ? performance.now()
+        : Date.now()
+
+      const anim = this.altitudeAnimation
+      const currentAlt = Number.isFinite(anim.renderAlt)
+        ? anim.renderAlt
+        : (Number.isFinite(this.telemetryAltDisplay) ? this.telemetryAltDisplay : target)
+
+      anim.fromAlt = currentAlt
+      anim.toAlt = target
+      anim.renderAlt = currentAlt
+      anim.segmentStartAt = nowPerf
+      anim.segmentDurationMs = Math.max(260, Math.min(1500, Number(sampleIntervalMs) * 1.05 || 1050))
+
+      this.startAltitudeAnimationLoop()
+    },
+
+    startAltitudeAnimationLoop() {
+      if (!this.altitudeAnimation) return
+      if (typeof requestAnimationFrame !== 'function') return
+      if (this.altitudeAnimation.rafId) return
+
+      const easeInOutSine = t => -(Math.cos(Math.PI * t) - 1) / 2
+      const tick = (ts) => {
+        if (!this.altitudeAnimation) return
+        const anim = this.altitudeAnimation
+        const start = Number(anim.segmentStartAt)
+        const duration = Number(anim.segmentDurationMs)
+
+        if (!Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0) {
+          this.telemetryAltDisplay = Number(anim.toAlt)
+          this.updateDroneMarkerVisuals()
+          anim.rafId = null
+          return
+        }
+
+        const raw = Math.min(1, Math.max(0, (ts - start) / duration))
+        const p = easeInOutSine(raw)
+        const from = Number(anim.fromAlt)
+        const to = Number(anim.toAlt)
+        if (!Number.isFinite(from) || !Number.isFinite(to)) {
+          anim.rafId = null
+          return
+        }
+
+        anim.renderAlt = from + ((to - from) * p)
+        this.telemetryAltDisplay = anim.renderAlt
+        this.updateDroneMarkerVisuals()
+
+        if (raw < 1) {
+          anim.rafId = requestAnimationFrame(tick)
+        } else {
+          anim.renderAlt = to
+          this.telemetryAltDisplay = to
+          this.updateDroneMarkerVisuals()
+          anim.rafId = null
+        }
       }
-      this.droneConnected = true
+
+      this.altitudeAnimation.rafId = requestAnimationFrame(tick)
+    },
+
+    updateAltitudeTrend(nextAlt, tsNow) {
+      const alt = Number(nextAlt)
+      if (!Number.isFinite(alt)) return
+
+      const prevAlt = Number(this.telemetryAlt)
+      const prevTs = Number(this.lastTelemetryTs)
+      this.telemetryAlt = Number(alt.toFixed(3))
+      if (!Number.isFinite(this.telemetryAltDisplay)) {
+        this.telemetryAltDisplay = this.telemetryAlt
+      }
+      const sampleIntervalMs = Number.isFinite(prevTs) && tsNow > prevTs ? (tsNow - prevTs) : 1000
+      this.queueAltitudeAnimation(this.telemetryAlt, sampleIntervalMs)
+
+      if (Number.isFinite(prevAlt) && Number.isFinite(prevTs) && tsNow > prevTs) {
+        const delta = alt - prevAlt
+        const dt = Math.max(1, tsNow - prevTs) / 1000
+        this.telemetryVerticalSpeed = delta / dt
+
+        const ALT_DELTA_THRESHOLD = 0.0008
+        if (delta > ALT_DELTA_THRESHOLD) {
+          this.droneAltTrend = 'up'
+        } else if (delta < -ALT_DELTA_THRESHOLD) {
+          this.droneAltTrend = 'down'
+        } else {
+          this.droneAltTrend = 'stable'
+        }
+      } else {
+        this.telemetryVerticalSpeed = null
+        this.droneAltTrend = 'stable'
+      }
+
+      this.lastTelemetryTs = tsNow
     },
 
     initWS() {
@@ -541,6 +798,9 @@ export default {
 
         this.$nextTick(() => this.map?.invalidateSize(true))
         this.mapReady = true
+        this.syncGeofenceMapClickBinding()
+        this.rebuildGeofencePointMarkers()
+        this.renderGeofence()
         if (this.dronePos) {
           this.updateDroneLocation(this.dronePos.lat, this.dronePos.lon, this.dronePos.precision)
         }
@@ -553,6 +813,219 @@ export default {
         () => start(fallbackLat, fallbackLon),
         { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
       )
+    },
+
+    syncGeofenceMapClickBinding() {
+      if (!this.map) return
+      this.map.off('click', this.handleGeofenceMapClick)
+      if (this.geofenceMode) {
+        this.map.on('click', this.handleGeofenceMapClick)
+      }
+    },
+
+    normalizeGeofencePoints(points) {
+      if (!Array.isArray(points)) return []
+      return points
+        .map((point) => {
+          if (Array.isArray(point) && point.length >= 2) {
+            return [Number(point[0]), Number(point[1])]
+          }
+          if (point && typeof point === 'object') {
+            return [Number(point.lat), Number(point.lon)]
+          }
+          return null
+        })
+        .filter((pair) => {
+          if (!Array.isArray(pair)) return false
+          const [lat, lon] = pair
+          return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+        })
+        .map(([lat, lon]) => [Number(lat.toFixed(7)), Number(lon.toFixed(7))])
+    },
+
+    createGeofencePointIcon() {
+      return L.divIcon({
+        className: `geofence-point-icon${this.geofenceMode ? ' editing' : ''}`,
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+        html: '<span class="geofence-point-dot"></span>'
+      })
+    },
+
+    createGeofencePointMarker(point, index) {
+      if (!this.map) return null
+      const marker = L.marker(point, {
+        icon: this.createGeofencePointIcon(),
+        draggable: this.geofenceMode,
+        keyboard: false,
+        zIndexOffset: 950
+      }).addTo(this.map)
+
+      if (this.geofenceMode) {
+        marker.on('drag', (evt) => this.handleGeofencePointDrag(index, evt))
+        marker.on('dragend', () => this.markGeofenceChanged())
+      }
+      return marker
+    },
+
+    rebuildGeofencePointMarkers() {
+      this.geofencePointMarkers.forEach((marker) => {
+        try { marker.remove() } catch (e) { console.warn('Error', e) }
+      })
+      this.geofencePointMarkers = []
+
+      if (!this.map || !this.geofencePoints.length) return
+      this.geofencePoints.forEach((point, index) => {
+        const marker = this.createGeofencePointMarker(point, index)
+        if (marker) this.geofencePointMarkers.push(marker)
+      })
+    },
+
+    markGeofenceChanged() {
+      this.geofenceDirty = true
+      this.geofenceError = null
+      this.geofenceNotice = null
+    },
+
+    startGeofenceEdit() {
+      this.setGeofenceMode(true)
+      this.geofenceError = null
+      this.geofenceNotice = 'Edición geofence activa'
+    },
+
+    stopGeofenceEdit() {
+      this.setGeofenceMode(false)
+      this.geofenceError = null
+      this.geofenceNotice = null
+    },
+
+    setGeofenceMode(enabled) {
+      this.geofenceMode = Boolean(enabled)
+      this.syncGeofenceMapClickBinding()
+      this.rebuildGeofencePointMarkers()
+    },
+
+    handleGeofencePointDrag(index, evt) {
+      if (!this.geofenceMode) return
+      const latlng = evt?.target?.getLatLng?.()
+      if (!latlng) return
+      const normalized = this.normalizeGeofencePoints([[latlng.lat, latlng.lng]])
+      if (!normalized.length) return
+      if (index < 0 || index >= this.geofencePoints.length) return
+      this.geofencePoints.splice(index, 1, normalized[0])
+      this.renderGeofence()
+    },
+
+    handleGeofenceMapClick(evt) {
+      if (!this.geofenceMode || !this.map || !evt?.latlng) return
+      this.addGeofencePoint(evt.latlng)
+    },
+
+    addGeofencePoint(latlng) {
+      const normalized = this.normalizeGeofencePoints([[latlng.lat, latlng.lng]])
+      if (!normalized.length) return
+      const point = normalized[0]
+      this.geofencePoints.push(point)
+      const marker = this.createGeofencePointMarker(point, this.geofencePoints.length - 1)
+      if (marker) this.geofencePointMarkers.push(marker)
+      this.markGeofenceChanged()
+      this.renderGeofence()
+    },
+
+    removeGeofenceLayers() {
+      if (this.geofencePreviewLine) {
+        try { this.geofencePreviewLine.remove() } catch (e) { console.warn('Error', e) }
+      }
+      if (this.geofencePolygon) {
+        try { this.geofencePolygon.remove() } catch (e) { console.warn('Error', e) }
+      }
+      if (this.geofenceMask) {
+        try { this.geofenceMask.remove() } catch (e) { console.warn('Error', e) }
+      }
+      this.geofencePreviewLine = null
+      this.geofencePolygon = null
+      this.geofenceMask = null
+    },
+
+    renderGeofence() {
+      if (!this.map) return
+      this.removeGeofenceLayers()
+
+      if (this.geofencePoints.length >= 2) {
+        this.geofencePreviewLine = L.polyline(this.geofencePoints, {
+          color: '#22c55e',
+          weight: 2,
+          dashArray: '6 6',
+          interactive: false
+        }).addTo(this.map)
+      }
+
+      if (this.geofencePoints.length >= 3) {
+        this.geofencePolygon = L.polygon(this.geofencePoints, {
+          color: '#22c55e',
+          weight: 2,
+          fillColor: '#22c55e',
+          fillOpacity: 0.1,
+          interactive: false
+        }).addTo(this.map)
+
+        const worldRing = [
+          [-90, -360],
+          [-90, 360],
+          [90, 360],
+          [90, -360]
+        ]
+
+        this.geofenceMask = L.polygon([worldRing, this.geofencePoints], {
+          stroke: false,
+          fillColor: '#ff0000',
+          fillOpacity: 0.34,
+          fillRule: 'evenodd',
+          interactive: false
+        }).addTo(this.map)
+
+        this.geofenceMask.bringToBack()
+        this.geofencePolygon.bringToFront()
+      }
+
+      if (this.geofencePreviewLine) this.geofencePreviewLine.bringToFront()
+      this.geofencePointMarkers.forEach((m) => m?.bringToFront?.())
+    },
+
+    buildSetGeofencePayload(points) {
+      const puntos = this.normalizeGeofencePoints(points).map(([lat, lon]) => ({ lat, lon }))
+      return { puntos }
+    },
+
+    async saveGeofence() {
+      this.geofenceError = null
+      this.geofenceNotice = null
+      const points = this.normalizeGeofencePoints(this.geofencePoints)
+      if (points.length < 3) {
+        this.geofenceError = 'Necesitas al menos 3 puntos para guardar el geofence'
+        return
+      }
+
+      const mqttPayload = this.buildSetGeofencePayload(points)
+      try {
+        await this.mqttPublish(this.mqttTopics.geofence, JSON.stringify(mqttPayload))
+        this.geofenceDirty = false
+        this.geofenceNotice = `Geofence guardado y publicado en ${this.mqttTopics.geofence}`
+      } catch (e) {
+        this.geofenceError = `No se pudo publicar el geofence por MQTT: ${e.message || 'error desconocido'}`
+      }
+    },
+
+    clearGeofence(silent = false) {
+      const hadPoints = this.geofencePoints.length > 0
+      this.geofencePoints = []
+      this.removeGeofenceLayers()
+      this.rebuildGeofencePointMarkers()
+      this.geofenceError = null
+      this.geofenceNotice = null
+      if (!silent && hadPoints) {
+        this.markGeofenceChanged()
+      }
     },
 
     ensurePlayerLayers(aliasColor, latlng) {
@@ -852,12 +1325,9 @@ export default {
     ensureDroneLayers(latlng, accuracy) {
       if (!this.mapReady || !this.map) return
       if (!this.droneMarker) {
-        this.droneMarker = L.circleMarker(latlng, {
-          radius: 8,
-          weight: 2,
-          color: '#111111',
-          fillColor: '#ff9800',
-          fillOpacity: 0.95
+        this.droneMarker = L.marker(latlng, {
+          icon: this.createDroneIcon(),
+          zIndexOffset: 900
         }).addTo(this.map).bindPopup('Dron')
       }
       if (!this.droneAcc) {
@@ -869,23 +1339,214 @@ export default {
           fillOpacity: 0.08
         }).addTo(this.map)
       }
+      this.updateDroneMarkerVisuals()
     },
 
-    updateDroneLocation(lat, lon, accuracy) {
+    createDroneIcon() {
+      return L.divIcon({
+        className: 'drone-icon-host',
+        iconSize: [58, 58],
+        iconAnchor: [29, 29],
+        popupAnchor: [0, -26],
+        html: `
+          <div class="drone-marker trend-stable" style="--heading-deg: 0deg;">
+            <div class="drone-rotatable">
+              <span class="drone-arm drone-arm-h"></span>
+              <span class="drone-arm drone-arm-v"></span>
+              <span class="drone-prop drone-prop-tl"></span>
+              <span class="drone-prop drone-prop-tr"></span>
+              <span class="drone-prop drone-prop-bl"></span>
+              <span class="drone-prop drone-prop-br"></span>
+              <span class="drone-body"></span>
+              <span class="drone-nose"></span>
+            </div>
+            <div class="drone-alt-badge">
+              <span class="drone-alt-arrow">↔</span>
+              <span class="drone-alt-value">--.- m</span>
+            </div>
+          </div>
+        `
+      })
+    },
+
+    updateDroneMarkerVisuals() {
+      if (!this.droneMarker) return
+      const markerEl = this.droneMarker.getElement?.()
+      if (!markerEl) return
+
+      const root = markerEl.querySelector('.drone-marker')
+      if (!root) return
+
+      const trend = this.droneAltTrend || 'stable'
+      root.classList.remove('trend-up', 'trend-down', 'trend-stable')
+      root.classList.add(`trend-${trend}`)
+
+      const heading = Number.isFinite(this.telemetryHeading) ? this.telemetryHeading : 0
+      root.style.setProperty('--heading-deg', `${heading.toFixed(2)}deg`)
+
+      const altArrow = markerEl.querySelector('.drone-alt-arrow')
+      if (altArrow) {
+        altArrow.textContent = trend === 'up' ? '↑' : trend === 'down' ? '↓' : '↔'
+      }
+
+      const altValue = markerEl.querySelector('.drone-alt-value')
+      if (altValue) {
+        const altToRender = Number.isFinite(this.telemetryAltDisplay) ? this.telemetryAltDisplay : this.telemetryAlt
+        altValue.textContent = Number.isFinite(altToRender) ? `${altToRender.toFixed(3)} m` : '--.- m'
+      }
+    },
+
+    cancelDroneAnimation() {
+      if (!this.droneAnimation) return
+      if (this.droneAnimation.rafId && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(this.droneAnimation.rafId)
+      }
+      this.droneAnimation = null
+    },
+
+    setDronePosition(lat, lon) {
+      if (!this.droneMarker) return
+      const latNum = Number(lat)
+      const lonNum = Number(lon)
+      if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return
+      const pos = [latNum, lonNum]
+      this.droneMarker.setLatLng(pos)
+      if (this.droneAcc) this.droneAcc.setLatLng(pos)
+      if (this.droneAnimation) {
+        this.droneAnimation.renderLat = latNum
+        this.droneAnimation.renderLon = lonNum
+      }
+    },
+
+    updateDroneTarget(lat, lon, sampleTs = Date.now()) {
+      if (!this.droneMarker) return
+      const targetLat = Number(lat)
+      const targetLon = Number(lon)
+      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) return
+
+      if (typeof requestAnimationFrame !== 'function') {
+        this.setDronePosition(targetLat, targetLon)
+        return
+      }
+
+      if (!this.droneAnimation) {
+        this.droneAnimation = {
+          rafId: null,
+          lastSampleTs: null,
+          segmentStartAt: null,
+          segmentDurationMs: 1000,
+          fromLat: targetLat,
+          fromLon: targetLon,
+          toLat: targetLat,
+          toLon: targetLon,
+          renderLat: null,
+          renderLon: null
+        }
+      }
+
+      const anim = this.droneAnimation
+
+      const current = this.droneMarker.getLatLng?.()
+      if (
+        current &&
+        Number.isFinite(current.lat) &&
+        Number.isFinite(current.lng) &&
+        (!Number.isFinite(this.droneAnimation.renderLat) || !Number.isFinite(this.droneAnimation.renderLon))
+      ) {
+        anim.renderLat = Number(current.lat)
+        anim.renderLon = Number(current.lng)
+      }
+
+      const lastSampleTs = Number(anim.lastSampleTs)
+      const sampleIntervalMs = Number.isFinite(lastSampleTs) && sampleTs > lastSampleTs
+        ? sampleTs - lastSampleTs
+        : 1000
+
+      const nowPerf = typeof performance !== 'undefined' && performance.now
+        ? performance.now()
+        : Date.now()
+
+      const fromLat = Number.isFinite(anim.renderLat) ? anim.renderLat : targetLat
+      const fromLon = Number.isFinite(anim.renderLon) ? anim.renderLon : targetLon
+
+      anim.fromLat = fromLat
+      anim.fromLon = fromLon
+      anim.toLat = targetLat
+      anim.toLon = targetLon
+      anim.segmentStartAt = nowPerf
+      anim.segmentDurationMs = Math.max(260, Math.min(1500, sampleIntervalMs * 1.05))
+      anim.lastSampleTs = sampleTs
+
+      this.startDroneSmoothingLoop()
+    },
+
+    startDroneSmoothingLoop() {
+      if (!this.droneMarker || !this.droneAnimation) return
+      if (typeof requestAnimationFrame !== 'function') return
+      if (this.droneAnimation.rafId) return
+
+      const easeInOutSine = t => -(Math.cos(Math.PI * t) - 1) / 2
+      const tick = (ts) => {
+        if (!this.droneMarker || !this.droneAnimation) return
+
+        const anim = this.droneAnimation
+        const fromLat = Number(anim.fromLat)
+        const fromLon = Number(anim.fromLon)
+        const toLat = Number(anim.toLat)
+        const toLon = Number(anim.toLon)
+        const start = Number(anim.segmentStartAt)
+        const duration = Number(anim.segmentDurationMs)
+
+        if (
+          !Number.isFinite(fromLat) ||
+          !Number.isFinite(fromLon) ||
+          !Number.isFinite(toLat) ||
+          !Number.isFinite(toLon) ||
+          !Number.isFinite(start) ||
+          !Number.isFinite(duration) ||
+          duration <= 0
+        ) {
+          anim.rafId = null
+          return
+        }
+
+        const raw = Math.min(1, Math.max(0, (ts - start) / duration))
+        const p = easeInOutSine(raw)
+
+        anim.renderLat = fromLat + ((toLat - fromLat) * p)
+        anim.renderLon = fromLon + ((toLon - fromLon) * p)
+        this.setDronePosition(anim.renderLat, anim.renderLon)
+
+        if (raw < 1) {
+          anim.rafId = requestAnimationFrame(tick)
+        } else {
+          anim.renderLat = toLat
+          anim.renderLon = toLon
+          this.setDronePosition(toLat, toLon)
+          anim.rafId = null
+        }
+      }
+
+      this.droneAnimation.rafId = requestAnimationFrame(tick)
+    },
+
+    updateDroneLocation(lat, lon, accuracy, sampleTs = Date.now()) {
       if (!this.mapReady || !this.map) return
       const latNum = Number(lat)
       const lonNum = Number(lon)
       if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return
       const latlng = [latNum, lonNum]
       this.ensureDroneLayers(latlng, accuracy)
-      if (this.droneMarker) this.droneMarker.setLatLng(latlng)
-      if (this.droneAcc) this.droneAcc.setLatLng(latlng)
+      this.updateDroneTarget(latNum, lonNum, sampleTs)
       if (this.droneAcc && Number.isFinite(accuracy) && accuracy > 0) {
         this.droneAcc.setRadius(Math.min(accuracy, 80))
       }
+      this.updateDroneMarkerVisuals()
     },
 
     clearDroneLocation() {
+      this.cancelDroneAnimation()
+      this.cancelAltitudeAnimation()
       if (this.droneMarker) {
         try { this.droneMarker.remove() } catch (e) { console.warn('Error', e) }
       }
@@ -894,9 +1555,17 @@ export default {
       }
       this.droneMarker = null
       this.droneAcc = null
+      this.droneAnimation = null
       this.dronePos = null
+      this.telemetryAlt = null
+      this.telemetryAltDisplay = null
       this.telemetryLat = null
       this.telemetryLon = null
+      this.telemetryHeading = null
+      this.telemetryVerticalSpeed = null
+      this.lastTelemetryTs = null
+      this.altitudeAnimation = null
+      this.droneAltTrend = 'stable'
     },
 
     clearAdminLocation() {
@@ -1388,6 +2057,170 @@ export default {
   box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
 }
 
+:deep(.geofence-point-icon) {
+  background: transparent;
+  border: none;
+}
+
+:deep(.geofence-point-dot) {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
+  background: #22c55e;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+}
+
+:deep(.geofence-point-icon.editing .geofence-point-dot) {
+  cursor: grab;
+  background: #16a34a;
+}
+
+:deep(.drone-icon-host) {
+  width: 58px !important;
+  height: 58px !important;
+  margin-left: -29px !important;
+  margin-top: -29px !important;
+  background: transparent;
+  border: none;
+}
+
+:deep(.drone-marker) {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  transform-origin: center;
+  will-change: transform;
+}
+
+:deep(.drone-rotatable) {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  transform: rotate(var(--heading-deg, 0deg));
+  transition: transform 0.18s linear;
+}
+
+:deep(.drone-arm) {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: #f8fafc;
+  opacity: 0.85;
+  transform: translate(-50%, -50%);
+}
+
+:deep(.drone-arm-h) {
+  width: 24px;
+  height: 2px;
+}
+
+:deep(.drone-arm-v) {
+  width: 2px;
+  height: 24px;
+}
+
+:deep(.drone-prop) {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #22d3ee;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.45);
+}
+
+:deep(.drone-prop-tl) { left: 0; top: 0; }
+:deep(.drone-prop-tr) { right: 0; top: 0; }
+:deep(.drone-prop-bl) { left: 0; bottom: 0; }
+:deep(.drone-prop-br) { right: 0; bottom: 0; }
+
+:deep(.drone-body) {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #f59e0b;
+  border: 2px solid #111827;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.45);
+}
+
+:deep(.drone-nose) {
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-bottom: 7px solid #fb7185;
+  transform: translateX(-50%);
+}
+
+:deep(.drone-alt-badge) {
+  position: absolute;
+  left: 50%;
+  bottom: -8px;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1;
+  color: #e2e8f0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+:deep(.drone-marker.trend-up) {
+  animation: drone-rise 0.55s ease-in-out infinite alternate;
+}
+
+:deep(.drone-marker.trend-up .drone-alt-badge) {
+  color: #86efac;
+  border-color: rgba(22, 163, 74, 0.65);
+}
+
+:deep(.drone-marker.trend-up .drone-body) {
+  background: #22c55e;
+}
+
+:deep(.drone-marker.trend-down) {
+  animation: drone-fall 0.55s ease-in-out infinite alternate;
+}
+
+:deep(.drone-marker.trend-down .drone-alt-badge) {
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.65);
+}
+
+:deep(.drone-marker.trend-down .drone-body) {
+  background: #ef4444;
+}
+
+:deep(.drone-marker.trend-stable .drone-alt-badge) {
+  color: #cbd5e1;
+}
+
+@keyframes drone-rise {
+  from { transform: translateY(1px); }
+  to { transform: translateY(-3px); }
+}
+
+@keyframes drone-fall {
+  from { transform: translateY(-1px); }
+  to { transform: translateY(3px); }
+}
+
 .admin-container.camera-on .map {
   height: 38vh;
   min-height: 260px;
@@ -1679,6 +2512,16 @@ export default {
   color: #00263a;
 }
 
+.btn.geofence {
+  background: linear-gradient(135deg, #86efac, #22c55e);
+  color: #03240f;
+}
+
+.btn.save {
+  background: linear-gradient(135deg, #fcd34d, #f59e0b);
+  color: #3f2400;
+}
+
 .btn.danger {
   background: linear-gradient(135deg, #ff4d4d, #d63031);
   color: white;
@@ -1715,7 +2558,9 @@ export default {
 .btn.danger:hover:not(:disabled),
 .btn.cam:hover:not(:disabled),
 .btn.takeoff:hover:not(:disabled),
-.btn.goto:hover:not(:disabled) {
+.btn.goto:hover:not(:disabled),
+.btn.save:hover:not(:disabled),
+.btn.geofence:hover:not(:disabled) {
   transform: translateY(-2px);
 }
 
