@@ -264,6 +264,7 @@ export default {
       mqttBrokerUrl: (process.env.VUE_APP_MQTT_BROKER_URL || 'ws://broker.hivemq.com:8000/mqtt').trim(),
       mqttSubTopic: (process.env.VUE_APP_MQTT_SUB_TOPIC || 'demoDash/mobileFlask/#').trim(),
       mqttTelemetryTopic: (process.env.VUE_APP_MQTT_TOPIC_TELEMETRY || 'demoDash/mobileFlask/telemetryInfo').trim(),
+      mqttGeofencePointsTopic: (process.env.VUE_APP_MQTT_TOPIC_GEOFENCE_POINTS || 'mobileFlask/demoDash/geofencePoints').trim(),
       mqttTopics: {
         connect: (process.env.VUE_APP_MQTT_TOPIC_CONNECT || 'mobileFlask/demoDash/connect').trim(),
         disconnect: (process.env.VUE_APP_MQTT_TOPIC_DISCONNECT || 'mobileFlask/demoDash/disconnection').trim(),
@@ -329,6 +330,7 @@ export default {
       geofenceDirty: false,
       geofenceNotice: null,
       geofenceError: null,
+      geofencePendingFromMqtt: null,
 
       playersByAlias: {},
       playerAnimations: {},
@@ -426,6 +428,13 @@ export default {
             console.warn('Error en suscripción MQTT:', err)
           }
         })
+        if (this.mqttGeofencePointsTopic) {
+          this.mqttClient.subscribe(this.mqttGeofencePointsTopic, (err) => {
+            if (err) {
+              console.warn('Error en suscripción MQTT (geofencePoints):', err)
+            }
+          })
+        }
       })
 
       this.mqttClient.on('message', (topic, message) => {
@@ -483,6 +492,14 @@ export default {
       return received === 'telemetryinfo' || received.endsWith('/telemetryinfo')
     },
 
+    isGeofencePointsTopic(topic) {
+      const received = String(topic || '').trim().toLowerCase()
+      if (!received) return false
+      const configured = String(this.mqttGeofencePointsTopic || '').trim().toLowerCase()
+      if (configured && received === configured) return true
+      return received.endsWith('/geofencepoints') || received === 'geofencepoints'
+    },
+
     parseTelemetryPayload(message) {
       const raw = (message == null ? '' : message.toString()).trim()
       if (!raw) return null
@@ -517,7 +534,52 @@ export default {
       return null
     },
 
+    extractGeofencePointsFromPayload(payload) {
+      if (!payload) return []
+      if (Array.isArray(payload)) return this.normalizeGeofencePoints(payload)
+      if (Array.isArray(payload?.puntos)) return this.normalizeGeofencePoints(payload.puntos)
+      if (Array.isArray(payload?.points)) return this.normalizeGeofencePoints(payload.points)
+      return []
+    },
+
+    applyGeofenceFromMqttOnDroneConnect() {
+      if (!this.mapReady || !this.map) return
+      const pending = this.extractGeofencePointsFromPayload(this.geofencePendingFromMqtt)
+      if (pending.length < 3) {
+        this.geofenceError = 'No hay geofence válido en MQTT. Puedes dibujarlo manualmente.'
+        return
+      }
+
+      this.geofencePoints = pending
+      this.rebuildGeofencePointMarkers()
+      this.renderGeofence()
+      this.geofenceDirty = false
+      this.geofenceNotice = 'Geofence cargado desde MQTT al conectar el dron'
+      this.geofenceError = null
+    },
+
+    handleIncomingGeofencePoints(message) {
+      const data = this.parseTelemetryPayload(message)
+      const points = this.extractGeofencePointsFromPayload(data)
+      if (points.length < 3) {
+        if (this.droneConnected) {
+          this.geofenceError = 'Geofence recibido por MQTT inválido. Puedes dibujarlo manualmente.'
+        }
+        return
+      }
+
+      this.geofencePendingFromMqtt = { puntos: points }
+      if (this.droneConnected) {
+        this.applyGeofenceFromMqttOnDroneConnect()
+      }
+    },
+
     handleMqttMessage(topic, message) {
+      if (this.isGeofencePointsTopic(topic)) {
+        this.handleIncomingGeofencePoints(message)
+        return
+      }
+
       if (!this.isTelemetryTopic(topic)) return
       const data = this.parseTelemetryPayload(message)
       if (!data || typeof data !== 'object') {
@@ -801,6 +863,9 @@ export default {
         this.syncGeofenceMapClickBinding()
         this.rebuildGeofencePointMarkers()
         this.renderGeofence()
+        if (this.droneConnected) {
+          this.applyGeofenceFromMqttOnDroneConnect()
+        }
         if (this.dronePos) {
           this.updateDroneLocation(this.dronePos.lat, this.dronePos.lon, this.dronePos.precision)
         }
@@ -1754,6 +1819,7 @@ export default {
         } else {
           await this.mqttPublish(this.mqttTopics.connect, this.buildConnectPayload())
           this.droneConnected = true
+          this.applyGeofenceFromMqttOnDroneConnect()
         }
       } catch (e) {
         this.error = e.message || 'Error conectando dron'
