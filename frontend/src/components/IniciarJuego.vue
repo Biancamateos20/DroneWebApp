@@ -280,9 +280,6 @@ export default {
       pollTimer: null,
       mqttClient: null,
       mqttConnected: false,
-      mqttSubscriptionsReady: false,
-      mqttConnectionWaiters: [],
-      mqttSubscriptionWaiters: [],
       mqttBrokerUrl: (process.env.VUE_APP_MQTT_BROKER_URL || 'ws://broker.hivemq.com:8000/mqtt').trim(),
       mqttSubTopic: (process.env.VUE_APP_MQTT_SUB_TOPIC || 'demoDash/mobileFlask/#').trim(),
       mqttTelemetryTopic: (process.env.VUE_APP_MQTT_TOPIC_TELEMETRY || 'demoDash/mobileFlask/telemetryInfo').trim(),
@@ -322,8 +319,6 @@ export default {
       connectLoading: false,
       droneInAir: false,
       takeoffAlt: 5,
-      initialDroneSyncTimer: null,
-      initialDroneSyncAttempts: 0,
 
       cameraActive: false,
       cameraLoading: false,
@@ -355,7 +350,6 @@ export default {
       geofenceNotice: null,
       geofenceError: null,
       geofencePendingFromMqtt: null,
-      mapOverlaySyncQueued: false,
 
       playersByAlias: {},
       playerAnimations: {},
@@ -403,27 +397,6 @@ export default {
     }
   },
 
-  watch: {
-    mapReady(ready) {
-      if (ready) this.scheduleMapOverlaySync()
-    },
-    droneConnected(connected) {
-      if (connected) this.scheduleMapOverlaySync()
-    },
-    dronePos: {
-      deep: true,
-      handler(pos) {
-        if (pos) this.scheduleMapOverlaySync()
-      }
-    },
-    geofencePendingFromMqtt: {
-      deep: true,
-      handler(payload) {
-        if (payload) this.scheduleMapOverlaySync()
-      }
-    }
-  },
-
   mounted() {
     this.initMap()
     this.initWS()
@@ -442,7 +415,6 @@ export default {
 
   beforeUnmount() {
     if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
-    this.clearInitialDroneSyncRetry()
     this.cleanupCamera()
     if (navigator.mediaDevices && navigator.mediaDevices.ondevicechange === this.deviceChangeHandler) {
       navigator.mediaDevices.ondevicechange = null
@@ -461,165 +433,6 @@ export default {
   },
 
   methods: {
-    hasPendingGeofenceFromMqtt() {
-      return this.extractGeofencePointsFromPayload(this.geofencePendingFromMqtt).length >= 3
-    },
-
-    hasInitialDroneMapData() {
-      return Boolean(this.dronePos) || this.hasPendingGeofenceFromMqtt()
-    },
-
-    clearInitialDroneSyncRetry() {
-      if (this.initialDroneSyncTimer) {
-        clearTimeout(this.initialDroneSyncTimer)
-        this.initialDroneSyncTimer = null
-      }
-      this.initialDroneSyncAttempts = 0
-    },
-
-    scheduleInitialDroneSyncRetry() {
-      if (!this.droneConnected) return
-      if (this.hasInitialDroneMapData()) {
-        this.clearInitialDroneSyncRetry()
-        return
-      }
-      if (this.initialDroneSyncAttempts >= 2) return
-
-      if (this.initialDroneSyncTimer) {
-        clearTimeout(this.initialDroneSyncTimer)
-      }
-
-      this.initialDroneSyncTimer = setTimeout(async () => {
-        this.initialDroneSyncTimer = null
-        if (!this.droneConnected || this.hasInitialDroneMapData()) {
-          this.clearInitialDroneSyncRetry()
-          return
-        }
-
-        this.initialDroneSyncAttempts += 1
-        try {
-          await this.ensureMqttReady()
-          await this.mqttPublish(this.mqttTopics.connect, this.buildConnectPayload())
-        } catch (e) {
-          console.warn('No se pudo reintentar la sincronización inicial del dron:', e)
-        } finally {
-          if (this.hasInitialDroneMapData()) {
-            this.clearInitialDroneSyncRetry()
-          } else {
-            this.scheduleInitialDroneSyncRetry()
-          }
-        }
-      }, 1200)
-    },
-
-    flushMqttWaiters(waitersKey, error = null) {
-      const waiters = Array.isArray(this[waitersKey]) ? this[waitersKey] : []
-      this[waitersKey] = []
-      waiters.forEach(({ resolve, reject, timer }) => {
-        if (timer) clearTimeout(timer)
-        if (error) reject(error)
-        else resolve()
-      })
-    },
-
-    waitForMqttFlag(flagKey, waitersKey, timeoutMs, timeoutMessage) {
-      if (this[flagKey]) return Promise.resolve()
-      return new Promise((resolve, reject) => {
-        const entry = {
-          resolve,
-          reject,
-          timer: setTimeout(() => {
-            this[waitersKey] = (this[waitersKey] || []).filter(item => item !== entry)
-            reject(new Error(timeoutMessage))
-          }, timeoutMs)
-        }
-        this[waitersKey].push(entry)
-      })
-    },
-
-    waitForMqttConnection(timeoutMs = 5000) {
-      return this.waitForMqttFlag(
-        'mqttConnected',
-        'mqttConnectionWaiters',
-        timeoutMs,
-        'MQTT no se conectó a tiempo'
-      )
-    },
-
-    waitForMqttSubscriptions(timeoutMs = 5000) {
-      return this.waitForMqttFlag(
-        'mqttSubscriptionsReady',
-        'mqttSubscriptionWaiters',
-        timeoutMs,
-        'MQTT no terminó de suscribirse a tiempo'
-      )
-    },
-
-    async ensureMqttReady() {
-      if (!this.mqttClient) {
-        this.initMqtt()
-      }
-      await this.waitForMqttConnection()
-      await this.waitForMqttSubscriptions()
-    },
-
-    subscribeMqttTopic(topic) {
-      return new Promise((resolve, reject) => {
-        if (!this.mqttClient) {
-          reject(new Error('Cliente MQTT no inicializado'))
-          return
-        }
-        this.mqttClient.subscribe(topic, (err) => {
-          if (err) {
-            reject(err)
-            return
-          }
-          resolve()
-        })
-      })
-    },
-
-    scheduleMapOverlaySync() {
-      if (this.mapOverlaySyncQueued) return
-      this.mapOverlaySyncQueued = true
-
-      this.$nextTick(() => {
-        const flush = () => {
-          this.mapOverlaySyncQueued = false
-          this.syncMapOverlays()
-        }
-
-        if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(flush)
-          return
-        }
-
-        setTimeout(flush, 0)
-      })
-    },
-
-    syncMapOverlays() {
-      if (!this.mapReady || !this.map) return
-
-      this.map.invalidateSize(true)
-
-      if (this.droneConnected) {
-        this.applyGeofenceFromMqttOnDroneConnect()
-      } else if (this.geofencePoints.length) {
-        this.rebuildGeofencePointMarkers()
-        this.renderGeofence()
-      }
-
-      if (this.dronePos) {
-        this.updateDroneLocation(
-          this.dronePos.lat,
-          this.dronePos.lon,
-          this.dronePos.precision,
-          this.dronePos.ts || Date.now()
-        )
-      }
-    },
-
     setCameraZoom(mode) {
       this.cameraZoom = mode
     },
@@ -638,26 +451,19 @@ export default {
         return
       }
 
-      this.mqttConnected = false
-      this.mqttSubscriptionsReady = false
-
-      this.mqttClient.on('connect', async () => {
+      this.mqttClient.on('connect', () => {
         this.mqttConnected = true
-        this.flushMqttWaiters('mqttConnectionWaiters')
-
-        const topics = [this.mqttSubTopic]
-        if (this.mqttGeofencePointsTopic && this.mqttGeofencePointsTopic !== this.mqttSubTopic) {
-          topics.push(this.mqttGeofencePointsTopic)
-        }
-
-        try {
-          await Promise.all(topics.map(topic => this.subscribeMqttTopic(topic)))
-          this.mqttSubscriptionsReady = true
-          this.flushMqttWaiters('mqttSubscriptionWaiters')
-        } catch (err) {
-          console.warn('Error en suscripción MQTT:', err)
-          this.mqttSubscriptionsReady = false
-          this.flushMqttWaiters('mqttSubscriptionWaiters', err instanceof Error ? err : new Error('Error en suscripción MQTT'))
+        this.mqttClient.subscribe(this.mqttSubTopic, (err) => {
+          if (err) {
+            console.warn('Error en suscripción MQTT:', err)
+          }
+        })
+        if (this.mqttGeofencePointsTopic) {
+          this.mqttClient.subscribe(this.mqttGeofencePointsTopic, (err) => {
+            if (err) {
+              console.warn('Error en suscripción MQTT (geofencePoints):', err)
+            }
+          })
         }
       })
 
@@ -667,18 +473,11 @@ export default {
 
       this.mqttClient.on('close', () => {
         this.mqttConnected = false
-        this.mqttSubscriptionsReady = false
-        this.flushMqttWaiters('mqttConnectionWaiters', new Error('MQTT desconectado'))
-        this.flushMqttWaiters('mqttSubscriptionWaiters', new Error('MQTT desconectado'))
       })
 
       this.mqttClient.on('error', (err) => {
         console.warn('Error MQTT:', err)
         this.mqttConnected = false
-        this.mqttSubscriptionsReady = false
-        const error = err instanceof Error ? err : new Error('Error MQTT')
-        this.flushMqttWaiters('mqttConnectionWaiters', error)
-        this.flushMqttWaiters('mqttSubscriptionWaiters', error)
       })
     },
 
@@ -692,9 +491,6 @@ export default {
       }
       this.mqttClient = null
       this.mqttConnected = false
-      this.mqttSubscriptionsReady = false
-      this.flushMqttWaiters('mqttConnectionWaiters', new Error('MQTT desconectado'))
-      this.flushMqttWaiters('mqttSubscriptionWaiters', new Error('MQTT desconectado'))
     },
 
     mqttPublish(topic, payload = '') {
@@ -803,11 +599,8 @@ export default {
       }
 
       this.geofencePendingFromMqtt = { puntos: points }
-      this.clearInitialDroneSyncRetry()
       if (this.droneConnected) {
         this.applyGeofenceFromMqttOnDroneConnect()
-      } else {
-        this.scheduleMapOverlaySync()
       }
     },
 
@@ -864,7 +657,6 @@ export default {
           trend: this.droneAltTrend,
           ts: now
         }
-        this.clearInitialDroneSyncRetry()
         this.updateDroneLocation(telemetryLoc.lat, telemetryLoc.lon, telemetryLoc.precision, now)
       }
 
@@ -1107,7 +899,6 @@ export default {
         if (this.dronePos) {
           this.updateDroneLocation(this.dronePos.lat, this.dronePos.lon, this.dronePos.precision)
         }
-        this.scheduleMapOverlaySync()
       }
 
       if (!navigator.geolocation) return start(fallbackLat, fallbackLon)
@@ -2186,19 +1977,13 @@ export default {
       this.connectLoading = true
       try {
         if (this.droneConnected) {
-          this.clearInitialDroneSyncRetry()
-          await this.ensureMqttReady()
           await this.mqttPublish(this.mqttTopics.disconnect)
           this.droneConnected = false
           this.droneInAir = false
         } else {
-          this.clearInitialDroneSyncRetry()
-          await this.ensureMqttReady()
           await this.mqttPublish(this.mqttTopics.connect, this.buildConnectPayload())
           this.droneConnected = true
           this.applyGeofenceFromMqttOnDroneConnect()
-          this.scheduleMapOverlaySync()
-          this.scheduleInitialDroneSyncRetry()
         }
       } catch (e) {
         this.error = e.message || 'Error conectando dron'
