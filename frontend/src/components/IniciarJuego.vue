@@ -53,6 +53,10 @@
             · Dron: {{ telemetryLat.toFixed(6) }}, {{ telemetryLon.toFixed(6) }}
           </span>
         </p>
+        <p class="mini-note">
+          MQTT broker: {{ mqttBrokerUrl }}
+          <span v-if="mqttDebugLastTopic">· último topic: {{ mqttDebugLastTopic }}</span>
+        </p>
 
         <div class="lab-grid">
           <div class="lab-group">
@@ -149,6 +153,9 @@
             <p class="mini-note">
               Se aplica a "Ir al admin" y "Ir al jugador". Si la ruta cruza el geofence,
               el dron se detendrá {{ sanitizedGeofenceStopDistance.toFixed(1) }} m antes del borde.
+            </p>
+            <p v-if="canApplyGeofenceStopDistance" class="mini-note">
+              El mapa marca en vivo la parada prevista antes del geofence para el admin y el jugador seleccionado.
             </p>
             <p v-if="!canApplyGeofenceStopDistance" class="mini-note">
               Sin geofence activo o sin posición del dron, el GOTO irá al punto exacto.
@@ -284,6 +291,8 @@ export default {
       mqttSubTopic: (process.env.VUE_APP_MQTT_SUB_TOPIC || 'demoDash/mobileFlask/#').trim(),
       mqttTelemetryTopic: (process.env.VUE_APP_MQTT_TOPIC_TELEMETRY || 'demoDash/mobileFlask/telemetryInfo').trim(),
       mqttGeofencePointsTopic: (process.env.VUE_APP_MQTT_TOPIC_GEOFENCE_POINTS || 'mobileFlask/demoDash/geofencePoints').trim(),
+      mqttDebugLastTopic: null,
+      mqttDebugLastPayload: null,
       mqttTopics: {
         connect: (process.env.VUE_APP_MQTT_TOPIC_CONNECT || 'mobileFlask/demoDash/connect').trim(),
         disconnect: (process.env.VUE_APP_MQTT_TOPIC_DISCONNECT || 'mobileFlask/demoDash/disconnection').trim(),
@@ -346,6 +355,7 @@ export default {
       geofencePreviewLine: null,
       geofencePolygon: null,
       geofenceMask: null,
+      stopPreviewLayers: {},
       geofenceDirty: false,
       geofenceNotice: null,
       geofenceError: null,
@@ -394,6 +404,42 @@ export default {
       const value = Number(this.geofenceStopDistance)
       if (!Number.isFinite(value)) return 0
       return Math.max(0, value)
+    }
+  },
+
+  watch: {
+    mapReady() {
+      this.refreshAllStopPreviews()
+    },
+    geofenceStopDistance() {
+      this.refreshAllStopPreviews()
+    },
+    geofencePoints: {
+      handler() {
+        this.refreshAllStopPreviews()
+      },
+      deep: true
+    },
+    dronePos: {
+      handler() {
+        this.refreshAllStopPreviews()
+      },
+      deep: true
+    },
+    adminPos: {
+      handler() {
+        this.refreshAllStopPreviews()
+      },
+      deep: true
+    },
+    selectedPlayerAlias() {
+      this.refreshAllStopPreviews()
+    },
+    selectedPlayer: {
+      handler() {
+        this.refreshAllStopPreviews()
+      },
+      deep: true
     }
   },
 
@@ -453,18 +499,7 @@ export default {
 
       this.mqttClient.on('connect', () => {
         this.mqttConnected = true
-        this.mqttClient.subscribe(this.mqttSubTopic, (err) => {
-          if (err) {
-            console.warn('Error en suscripción MQTT:', err)
-          }
-        })
-        if (this.mqttGeofencePointsTopic) {
-          this.mqttClient.subscribe(this.mqttGeofencePointsTopic, (err) => {
-            if (err) {
-              console.warn('Error en suscripción MQTT (geofencePoints):', err)
-            }
-          })
-        }
+        this.subscribeToMqttTopics()
       })
 
       this.mqttClient.on('message', (topic, message) => {
@@ -493,6 +528,47 @@ export default {
       this.mqttConnected = false
     },
 
+    normalizeMqttTopic(topic) {
+      return String(topic || '')
+        .trim()
+        .replace(/^\/+|\/+$/g, '')
+        .replace(/\/+/g, '/')
+    },
+
+    topicToWildcard(topic) {
+      const normalized = this.normalizeMqttTopic(topic)
+      if (!normalized || normalized.includes('#') || normalized.includes('+')) return normalized
+      const idx = normalized.lastIndexOf('/')
+      if (idx <= 0) return normalized
+      return `${normalized.slice(0, idx)}/#`
+    },
+
+    getMqttSubscriptionTopics() {
+      const topics = [
+        this.mqttSubTopic,
+        this.mqttTelemetryTopic,
+        this.topicToWildcard(this.mqttTelemetryTopic),
+        this.mqttGeofencePointsTopic,
+        this.topicToWildcard(this.mqttGeofencePointsTopic)
+      ]
+
+      return [...new Set(topics.map(topic => this.normalizeMqttTopic(topic)).filter(Boolean))]
+    },
+
+    subscribeToMqttTopics() {
+      if (!this.mqttClient || !this.mqttConnected) return
+
+      this.getMqttSubscriptionTopics().forEach((topic) => {
+        this.mqttClient.subscribe(topic, (err) => {
+          if (err) {
+            console.warn(`Error en suscripción MQTT (${topic}):`, err)
+          } else {
+            console.info(`Suscrito a MQTT: ${topic}`)
+          }
+        })
+      })
+    },
+
     mqttPublish(topic, payload = '') {
       return new Promise((resolve, reject) => {
         if (!this.mqttClient || !this.mqttConnected) {
@@ -515,19 +591,28 @@ export default {
     },
 
     isTelemetryTopic(topic) {
-      const received = String(topic || '').trim().toLowerCase()
+      const received = this.normalizeMqttTopic(topic).toLowerCase()
       if (!received) return false
-      const configured = String(this.mqttTelemetryTopic || '').trim().toLowerCase()
+      const configured = this.normalizeMqttTopic(this.mqttTelemetryTopic).toLowerCase()
       if (configured && received === configured) return true
       return received === 'telemetryinfo' || received.endsWith('/telemetryinfo')
     },
 
     isGeofencePointsTopic(topic) {
-      const received = String(topic || '').trim().toLowerCase()
+      const received = this.normalizeMqttTopic(topic).toLowerCase()
       if (!received) return false
-      const configured = String(this.mqttGeofencePointsTopic || '').trim().toLowerCase()
+      const configured = this.normalizeMqttTopic(this.mqttGeofencePointsTopic).toLowerCase()
       if (configured && received === configured) return true
       return received.endsWith('/geofencepoints') || received === 'geofencepoints'
+    },
+
+    normalizeJsonLikePayload(raw) {
+      return String(raw || '')
+        .replace(/\bNone\b/g, 'null')
+        .replace(/\bTrue\b/g, 'true')
+        .replace(/\bFalse\b/g, 'false')
+        .replace(/\((\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*)\)/g, '[$1]')
+        .replace(/'/g, '"')
     },
 
     parseTelemetryPayload(message) {
@@ -537,26 +622,31 @@ export default {
       try {
         return JSON.parse(raw)
       } catch (e) {
-        // payload con prefijo: "Telemetria enviada: {...}"
+        // payload con prefijo o con formato python
       }
 
-      const start = raw.indexOf('{')
-      const end = raw.lastIndexOf('}')
-      if (start >= 0 && end > start) {
-        const jsonCandidate = raw.slice(start, end + 1)
+      const candidates = []
+      const objectStart = raw.indexOf('{')
+      const objectEnd = raw.lastIndexOf('}')
+      if (objectStart >= 0 && objectEnd > objectStart) {
+        candidates.push(raw.slice(objectStart, objectEnd + 1))
+      }
+
+      const arrayStart = raw.indexOf('[')
+      const arrayEnd = raw.lastIndexOf(']')
+      if (arrayStart >= 0 && arrayEnd > arrayStart) {
+        candidates.push(raw.slice(arrayStart, arrayEnd + 1))
+      }
+
+      for (const candidate of candidates) {
         try {
-          return JSON.parse(jsonCandidate)
+          return JSON.parse(candidate)
         } catch (e) {
-          // formato python dict con comillas simples
           try {
-            const normalized = jsonCandidate
-              .replace(/\bNone\b/g, 'null')
-              .replace(/\bTrue\b/g, 'true')
-              .replace(/\bFalse\b/g, 'false')
-              .replace(/'/g, '"')
+            const normalized = this.normalizeJsonLikePayload(candidate)
             return JSON.parse(normalized)
           } catch (err) {
-            return null
+            // seguimos con el siguiente candidato
           }
         }
       }
@@ -605,6 +695,9 @@ export default {
     },
 
     handleMqttMessage(topic, message) {
+      this.mqttDebugLastTopic = this.normalizeMqttTopic(topic)
+      this.mqttDebugLastPayload = message == null ? '' : message.toString()
+
       if (this.isGeofencePointsTopic(topic)) {
         this.handleIncomingGeofencePoints(message)
         return
@@ -1042,6 +1135,141 @@ export default {
       this.geofenceMask = null
     },
 
+    getStopPreviewStyle(kind) {
+      if (kind === 'admin') {
+        return {
+          color: '#38bdf8',
+          blockedColor: '#7dd3fc',
+          tooltip: 'Parada admin'
+        }
+      }
+
+      return {
+        color: '#f59e0b',
+        blockedColor: '#fdba74',
+        tooltip: this.selectedPlayer?.alias
+          ? `Parada ${this.selectedPlayer.alias}`
+          : 'Parada jugador'
+      }
+    },
+
+    ensureStopPreviewLayers(kind) {
+      if (!this.map) return null
+      if (this.stopPreviewLayers[kind]) return this.stopPreviewLayers[kind]
+
+      const style = this.getStopPreviewStyle(kind)
+      const routeLine = L.polyline([], {
+        color: style.color,
+        weight: 3,
+        dashArray: '7 7',
+        lineCap: 'round',
+        interactive: false,
+        opacity: 0.95
+      }).addTo(this.map)
+
+      const blockedLine = L.polyline([], {
+        color: style.blockedColor,
+        weight: 2,
+        dashArray: '2 10',
+        lineCap: 'round',
+        interactive: false,
+        opacity: 0.9
+      }).addTo(this.map)
+
+      const marker = L.circleMarker([0, 0], {
+        radius: 7,
+        weight: 2,
+        color: '#ffffff',
+        fillColor: style.color,
+        fillOpacity: 0.95,
+        interactive: false
+      }).addTo(this.map)
+
+      marker.bindTooltip(style.tooltip, {
+        permanent: true,
+        direction: 'top',
+        offset: [0, -10],
+        className: `stop-preview-tooltip stop-preview-tooltip-${kind}`
+      })
+
+      this.stopPreviewLayers[kind] = { routeLine, blockedLine, marker }
+      return this.stopPreviewLayers[kind]
+    },
+
+    clearStopPreview(kind) {
+      const keys = kind ? [kind] : Object.keys(this.stopPreviewLayers)
+      keys.forEach((key) => {
+        const layers = this.stopPreviewLayers[key]
+        if (!layers) return
+        try { layers.routeLine?.remove?.() } catch (e) { console.warn('Error', e) }
+        try { layers.blockedLine?.remove?.() } catch (e) { console.warn('Error', e) }
+        try { layers.marker?.remove?.() } catch (e) { console.warn('Error', e) }
+        delete this.stopPreviewLayers[key]
+      })
+    },
+
+    refreshAllStopPreviews() {
+      this.refreshStopPreview('admin')
+      this.refreshStopPreview('player')
+    },
+
+    refreshStopPreview(kind) {
+      if (!this.mapReady || !this.map) {
+        this.clearStopPreview(kind)
+        return
+      }
+
+      const target = kind === 'admin'
+        ? this.adminPos
+        : this.selectedPlayer
+
+      const droneLat = Number(this.dronePos?.lat)
+      const droneLon = Number(this.dronePos?.lon)
+      const targetLat = Number(target?.lat)
+      const targetLon = Number(target?.lon)
+
+      if (
+        !Number.isFinite(droneLat) ||
+        !Number.isFinite(droneLon) ||
+        !Number.isFinite(targetLat) ||
+        !Number.isFinite(targetLon) ||
+        this.geofencePoints.length < 3
+      ) {
+        this.clearStopPreview(kind)
+        return
+      }
+
+      const resolved = this.resolveGotoTarget(targetLat, targetLon)
+      if (!resolved.adjusted) {
+        this.clearStopPreview(kind)
+        return
+      }
+
+      const layers = this.ensureStopPreviewLayers(kind)
+      if (!layers) return
+
+      const style = this.getStopPreviewStyle(kind)
+      const droneLatLng = [droneLat, droneLon]
+      const stopLatLng = [resolved.lat, resolved.lon]
+      const targetLatLng = [targetLat, targetLon]
+
+      layers.routeLine.setStyle({ color: style.color })
+      layers.routeLine.setLatLngs([droneLatLng, stopLatLng])
+
+      layers.blockedLine.setStyle({ color: style.blockedColor })
+      layers.blockedLine.setLatLngs([stopLatLng, targetLatLng])
+
+      layers.marker.setStyle({ fillColor: style.color })
+      layers.marker.setLatLng(stopLatLng)
+      layers.marker.setTooltipContent(
+        `${style.tooltip} · ${resolved.appliedBackoffMeters.toFixed(1)} m antes`
+      )
+
+      layers.routeLine.bringToFront()
+      layers.blockedLine.bringToFront()
+      layers.marker.bringToFront()
+    },
+
     renderGeofence() {
       if (!this.map) return
       this.removeGeofenceLayers()
@@ -1084,6 +1312,7 @@ export default {
       }
 
       if (this.geofencePreviewLine) this.geofencePreviewLine.bringToFront()
+      this.refreshAllStopPreviews()
       this.geofencePointMarkers.forEach((m) => m?.bringToFront?.())
     },
 
@@ -1332,6 +1561,7 @@ export default {
     },
 
     clearMarkers() {
+      this.clearStopPreview('player')
       Object.keys(this.playersByAlias).forEach((alias) => this.removePlayer(alias))
       this.markers = {}
       this.playersByAlias = {}
@@ -1449,12 +1679,12 @@ export default {
 
       const hit = this.findFirstRouteGeofenceIntersection(droneLat, droneLon, targetLat, targetLon)
       if (!hit) {
-        return { lat: targetLat, lon: targetLon, adjusted: false }
+        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
       }
 
       const distanceToIntersection = hit.routeLength * hit.t
       if (distanceToIntersection <= 0) {
-        return { lat: targetLat, lon: targetLon, adjusted: false }
+        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
       }
 
       const backoffMeters = Math.min(stopDistance, distanceToIntersection)
@@ -1470,7 +1700,8 @@ export default {
       return {
         lat: Number(adjusted.lat.toFixed(7)),
         lon: Number(adjusted.lon.toFixed(7)),
-        adjusted: true
+        adjusted: true,
+        appliedBackoffMeters: backoffMeters
       }
     },
 
@@ -1774,6 +2005,7 @@ export default {
     },
 
     clearDroneLocation() {
+      this.clearStopPreview()
       this.cancelDroneAnimation()
       this.cancelAltitudeAnimation()
       if (this.droneMarker) {
@@ -1798,6 +2030,7 @@ export default {
     },
 
     clearAdminLocation() {
+      this.clearStopPreview('admin')
       if (this.adminMarker) {
         try { this.adminMarker.remove() } catch (e) { console.warn("Error", e) }
       }
@@ -2301,6 +2534,29 @@ export default {
 :deep(.geofence-point-icon.editing .geofence-point-dot) {
   cursor: grab;
   background: #16a34a;
+}
+
+:deep(.stop-preview-tooltip) {
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 999px;
+  color: #e2e8f0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.35);
+}
+
+:deep(.stop-preview-tooltip::before) {
+  border-top-color: rgba(15, 23, 42, 0.96);
+}
+
+:deep(.stop-preview-tooltip-admin) {
+  color: #bae6fd;
+}
+
+:deep(.stop-preview-tooltip-player) {
+  color: #fed7aa;
 }
 
 :deep(.drone-icon-host) {
