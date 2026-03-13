@@ -135,6 +135,25 @@
           <div class="lab-group">
             <div class="lab-title">Modo objetivo</div>
 
+            <label class="mini-field">
+              <span>Parada antes del geofence (m)</span>
+              <input
+                v-model.number="geofenceStopDistance"
+                type="number"
+                min="0"
+                max="200"
+                step="0.5"
+                @change="sanitizeGeofenceStopDistance"
+              />
+            </label>
+            <p class="mini-note">
+              Se aplica a "Ir al admin" y "Ir al jugador". Si la ruta cruza el geofence,
+              el dron se detendrá {{ sanitizedGeofenceStopDistance.toFixed(1) }} m antes del borde.
+            </p>
+            <p v-if="!canApplyGeofenceStopDistance" class="mini-note">
+              Sin geofence activo o sin posición del dron, el GOTO irá al punto exacto.
+            </p>
+
             <div v-if="registeredPlayers.length" class="player-list">
               <button
                 v-for="player in registeredPlayers"
@@ -341,6 +360,7 @@ export default {
       playersByAlias: {},
       playerAnimations: {},
       selectedPlayerAlias: null,
+      geofenceStopDistance: 5,
       gotoPlayerLoading: false,
       gotoPlayerError: null
     }
@@ -370,6 +390,16 @@ export default {
       if (this.droneAltTrend === 'up') return `Subiendo${speedText}`
       if (this.droneAltTrend === 'down') return `Bajando${speedText}`
       return `Altitud estable${speedText}`
+    },
+    canApplyGeofenceStopDistance() {
+      return this.geofencePoints.length >= 3
+        && Number.isFinite(Number(this.dronePos?.lat))
+        && Number.isFinite(Number(this.dronePos?.lon))
+    },
+    sanitizedGeofenceStopDistance() {
+      const value = Number(this.geofenceStopDistance)
+      if (!Number.isFinite(value)) return 0
+      return Math.max(0, value)
     }
   },
 
@@ -1519,6 +1549,140 @@ export default {
       this.gotoPlayerError = null
     },
 
+    sanitizeGeofenceStopDistance() {
+      const normalized = Number(this.sanitizedGeofenceStopDistance.toFixed(1))
+      this.geofenceStopDistance = normalized
+      return normalized
+    },
+
+    latLonToMeters(lat, lon, originLat, originLon) {
+      const earthRadius = 6371000
+      const toRad = (degrees) => (degrees * Math.PI) / 180
+      const dLat = toRad(lat - originLat)
+      const dLon = toRad(lon - originLon)
+      const refLat = toRad(originLat)
+
+      return {
+        x: dLon * earthRadius * Math.cos(refLat),
+        y: dLat * earthRadius
+      }
+    },
+
+    metersToLatLon(x, y, originLat, originLon) {
+      const earthRadius = 6371000
+      const toDeg = (radians) => (radians * 180) / Math.PI
+      const refLat = (originLat * Math.PI) / 180
+      const lat = originLat + toDeg(y / earthRadius)
+      const lon = originLon + toDeg(x / (earthRadius * Math.cos(refLat)))
+      return { lat, lon }
+    },
+
+    findSegmentIntersection(start, end, edgeStart, edgeEnd) {
+      const EPSILON = 1e-9
+      const abx = end.x - start.x
+      const aby = end.y - start.y
+      const cdx = edgeEnd.x - edgeStart.x
+      const cdy = edgeEnd.y - edgeStart.y
+      const denominator = (abx * cdy) - (aby * cdx)
+
+      if (Math.abs(denominator) < EPSILON) return null
+
+      const acx = edgeStart.x - start.x
+      const acy = edgeStart.y - start.y
+      const t = ((acx * cdy) - (acy * cdx)) / denominator
+      const u = ((acx * aby) - (acy * abx)) / denominator
+
+      if (t < -EPSILON || t > 1 + EPSILON || u < -EPSILON || u > 1 + EPSILON) {
+        return null
+      }
+
+      return {
+        t: Math.min(1, Math.max(0, t)),
+        x: start.x + (t * abx),
+        y: start.y + (t * aby)
+      }
+    },
+
+    findFirstRouteGeofenceIntersection(startLat, startLon, endLat, endLon) {
+      const polygon = this.normalizeGeofencePoints(this.geofencePoints)
+      if (polygon.length < 3) return null
+
+      const originLat = startLat
+      const originLon = startLon
+      const start = this.latLonToMeters(startLat, startLon, originLat, originLon)
+      const end = this.latLonToMeters(endLat, endLon, originLat, originLon)
+      const routeLength = Math.hypot(end.x - start.x, end.y - start.y)
+      if (routeLength <= 0) return null
+
+      const hits = []
+      for (let i = 0; i < polygon.length; i += 1) {
+        const current = polygon[i]
+        const next = polygon[(i + 1) % polygon.length]
+        if (!current || !next) continue
+
+        const edgeStart = this.latLonToMeters(current[0], current[1], originLat, originLon)
+        const edgeEnd = this.latLonToMeters(next[0], next[1], originLat, originLon)
+        const hit = this.findSegmentIntersection(start, end, edgeStart, edgeEnd)
+        if (!hit) continue
+
+        const duplicated = hits.some(existing => Math.abs(existing.t - hit.t) < 1e-6)
+        if (!duplicated) hits.push(hit)
+      }
+
+      if (!hits.length) return null
+
+      hits.sort((a, b) => a.t - b.t)
+      return {
+        ...hits[0],
+        start,
+        routeLength,
+        originLat,
+        originLon
+      }
+    },
+
+    resolveGotoTarget(lat, lon) {
+      const targetLat = Number(lat)
+      const targetLon = Number(lon)
+      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) {
+        throw new Error('Coordenadas de destino inválidas')
+      }
+
+      const droneLat = Number(this.dronePos?.lat)
+      const droneLon = Number(this.dronePos?.lon)
+      const stopDistance = this.sanitizeGeofenceStopDistance()
+
+      if (!Number.isFinite(droneLat) || !Number.isFinite(droneLon) || this.geofencePoints.length < 3) {
+        return { lat: targetLat, lon: targetLon, adjusted: false }
+      }
+
+      const hit = this.findFirstRouteGeofenceIntersection(droneLat, droneLon, targetLat, targetLon)
+      if (!hit) {
+        return { lat: targetLat, lon: targetLon, adjusted: false }
+      }
+
+      const distanceToIntersection = hit.routeLength * hit.t
+      if (distanceToIntersection <= 0) {
+        return { lat: targetLat, lon: targetLon, adjusted: false }
+      }
+
+      const backoffMeters = Math.min(stopDistance, distanceToIntersection)
+      const unitBackX = (hit.start.x - hit.x) / distanceToIntersection
+      const unitBackY = (hit.start.y - hit.y) / distanceToIntersection
+      const adjusted = this.metersToLatLon(
+        hit.x + (unitBackX * backoffMeters),
+        hit.y + (unitBackY * backoffMeters),
+        hit.originLat,
+        hit.originLon
+      )
+
+      return {
+        lat: Number(adjusted.lat.toFixed(7)),
+        lon: Number(adjusted.lon.toFixed(7)),
+        adjusted: true
+      }
+    },
+
     parseTelemetryNumber(value) {
       if (value == null) return null
       if (typeof value === 'string') {
@@ -2268,14 +2432,10 @@ export default {
     },
 
     async publishGoto(lat, lon) {
-      const targetLat = Number(lat)
-      const targetLon = Number(lon)
-      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) {
-        throw new Error('Coordenadas de destino inválidas')
-      }
+      const target = this.resolveGotoTarget(lat, lon)
       await this.mqttPublish(this.mqttTopics.goto, JSON.stringify({
-        lat: targetLat,
-        lon: targetLon,
+        lat: target.lat,
+        lon: target.lon,
         h: Number(this.takeoffAlt)
       }))
     },
