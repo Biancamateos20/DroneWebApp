@@ -150,15 +150,8 @@
                 @change="sanitizeGeofenceStopDistance"
               />
             </label>
-            <p class="mini-note">
-              Se aplica a "Ir al admin" y "Ir al jugador". Si la ruta cruza el geofence,
-              el dron se detendrá {{ sanitizedGeofenceStopDistance.toFixed(1) }} m antes del borde.
-            </p>
             <p v-if="canApplyGeofenceStopDistance" class="mini-note">
               El mapa marca en vivo la parada prevista antes del geofence para el admin y el jugador seleccionado.
-            </p>
-            <p v-if="!canApplyGeofenceStopDistance" class="mini-note">
-              Sin geofence activo o sin posición del dron, el GOTO irá al punto exacto.
             </p>
 
             <div v-if="registeredPlayers.length" class="player-list">
@@ -177,8 +170,6 @@
                 </span>
               </button>
             </div>
-            <p v-else class="mini-note">No hay jugadores registrados todavía.</p>
-
             <div class="panel-actions lab-actions">
               <button
                 class="btn goto-user"
@@ -397,8 +388,6 @@ export default {
     },
     canApplyGeofenceStopDistance() {
       return this.geofencePoints.length >= 3
-        && Number.isFinite(Number(this.dronePos?.lat))
-        && Number.isFinite(Number(this.dronePos?.lon))
     },
     sanitizedGeofenceStopDistance() {
       const value = Number(this.geofenceStopDistance)
@@ -673,9 +662,24 @@ export default {
       this.geofencePoints = pending
       this.rebuildGeofencePointMarkers()
       this.renderGeofence()
+      this.focusMapOnGeofence(pending)
       this.geofenceDirty = false
       this.geofenceNotice = 'Geofence cargado desde MQTT al conectar el dron'
       this.geofenceError = null
+    },
+
+    focusMapOnGeofence(points) {
+      if (!this.map || !Array.isArray(points) || points.length < 3) return
+      try {
+        const bounds = L.latLngBounds(points)
+        if (!bounds.isValid()) return
+        this.map.fitBounds(bounds, {
+          padding: [36, 36],
+          maxZoom: 19
+        })
+      } catch (e) {
+        console.warn('No se pudo centrar el mapa en el geofence:', e)
+      }
     },
 
     handleIncomingGeofencePoints(message) {
@@ -1225,12 +1229,11 @@ export default {
 
       const droneLat = Number(this.dronePos?.lat)
       const droneLon = Number(this.dronePos?.lon)
+      const hasDronePosition = Number.isFinite(droneLat) && Number.isFinite(droneLon)
       const targetLat = Number(target?.lat)
       const targetLon = Number(target?.lon)
 
       if (
-        !Number.isFinite(droneLat) ||
-        !Number.isFinite(droneLon) ||
         !Number.isFinite(targetLat) ||
         !Number.isFinite(targetLon) ||
         this.geofencePoints.length < 3
@@ -1249,12 +1252,11 @@ export default {
       if (!layers) return
 
       const style = this.getStopPreviewStyle(kind)
-      const droneLatLng = [droneLat, droneLon]
       const stopLatLng = [resolved.lat, resolved.lon]
       const targetLatLng = [targetLat, targetLon]
 
       layers.routeLine.setStyle({ color: style.color })
-      layers.routeLine.setLatLngs([droneLatLng, stopLatLng])
+      layers.routeLine.setLatLngs(hasDronePosition ? [[droneLat, droneLon], stopLatLng] : [])
 
       layers.blockedLine.setStyle({ color: style.blockedColor })
       layers.blockedLine.setLatLngs([stopLatLng, targetLatLng])
@@ -1624,6 +1626,138 @@ export default {
       }
     },
 
+    isPointInsidePolygon(lat, lon, polygonPoints = this.geofencePoints) {
+      const polygon = this.normalizeGeofencePoints(polygonPoints)
+      if (polygon.length < 3) return false
+
+      let inside = false
+      for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+        const [latI, lonI] = polygon[i]
+        const [latJ, lonJ] = polygon[j]
+        const intersects = ((lonI > lon) !== (lonJ > lon))
+          && (lat < (((latJ - latI) * (lon - lonI)) / ((lonJ - lonI) || 1e-12)) + latI)
+        if (intersects) inside = !inside
+      }
+
+      return inside
+    },
+
+    getPolygonCentroidMeters(polygon, originLat, originLon) {
+      if (!polygon.length) return null
+      const points = polygon.map(([lat, lon]) => this.latLonToMeters(lat, lon, originLat, originLon))
+
+      let area = 0
+      let centroidX = 0
+      let centroidY = 0
+      for (let i = 0; i < points.length; i += 1) {
+        const current = points[i]
+        const next = points[(i + 1) % points.length]
+        const cross = (current.x * next.y) - (next.x * current.y)
+        area += cross
+        centroidX += (current.x + next.x) * cross
+        centroidY += (current.y + next.y) * cross
+      }
+
+      if (Math.abs(area) < 1e-9) {
+        return {
+          x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+          y: points.reduce((sum, point) => sum + point.y, 0) / points.length
+        }
+      }
+
+      const factor = 1 / (3 * area)
+      return {
+        x: centroidX * factor,
+        y: centroidY * factor
+      }
+    },
+
+    findClosestPointOnSegment(point, segStart, segEnd) {
+      const dx = segEnd.x - segStart.x
+      const dy = segEnd.y - segStart.y
+      const lengthSquared = (dx * dx) + (dy * dy)
+
+      if (lengthSquared <= 1e-9) {
+        return {
+          x: segStart.x,
+          y: segStart.y,
+          distance: Math.hypot(point.x - segStart.x, point.y - segStart.y)
+        }
+      }
+
+      const rawT = (((point.x - segStart.x) * dx) + ((point.y - segStart.y) * dy)) / lengthSquared
+      const t = Math.max(0, Math.min(1, rawT))
+      const x = segStart.x + (t * dx)
+      const y = segStart.y + (t * dy)
+
+      return {
+        x,
+        y,
+        distance: Math.hypot(point.x - x, point.y - y)
+      }
+    },
+
+    resolveTargetFromGeofence(targetLat, targetLon) {
+      const polygon = this.normalizeGeofencePoints(this.geofencePoints)
+      if (polygon.length < 3) {
+        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
+      }
+
+      if (this.isPointInsidePolygon(targetLat, targetLon, polygon)) {
+        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
+      }
+
+      const originLat = polygon[0][0]
+      const originLon = polygon[0][1]
+      const target = this.latLonToMeters(targetLat, targetLon, originLat, originLon)
+      const centroid = this.getPolygonCentroidMeters(polygon, originLat, originLon)
+      if (!centroid) {
+        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
+      }
+
+      let closest = null
+      for (let i = 0; i < polygon.length; i += 1) {
+        const current = polygon[i]
+        const next = polygon[(i + 1) % polygon.length]
+        const segStart = this.latLonToMeters(current[0], current[1], originLat, originLon)
+        const segEnd = this.latLonToMeters(next[0], next[1], originLat, originLon)
+        const candidate = this.findClosestPointOnSegment(target, segStart, segEnd)
+        if (!closest || candidate.distance < closest.distance) {
+          closest = candidate
+        }
+      }
+
+      if (!closest) {
+        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
+      }
+
+      const stopDistance = this.sanitizeGeofenceStopDistance()
+      const inwardX = centroid.x - closest.x
+      const inwardY = centroid.y - closest.y
+      const inwardLength = Math.hypot(inwardX, inwardY)
+      if (inwardLength <= 1e-6) {
+        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
+      }
+
+      let adjustedX = closest.x + ((inwardX / inwardLength) * stopDistance)
+      let adjustedY = closest.y + ((inwardY / inwardLength) * stopDistance)
+      let adjusted = this.metersToLatLon(adjustedX, adjustedY, originLat, originLon)
+
+      if (!this.isPointInsidePolygon(adjusted.lat, adjusted.lon, polygon)) {
+        adjustedX = closest.x + (inwardX * 0.5)
+        adjustedY = closest.y + (inwardY * 0.5)
+        adjusted = this.metersToLatLon(adjustedX, adjustedY, originLat, originLon)
+      }
+
+      return {
+        lat: Number(adjusted.lat.toFixed(7)),
+        lon: Number(adjusted.lon.toFixed(7)),
+        adjusted: true,
+        appliedBackoffMeters: stopDistance,
+        reference: 'geofence'
+      }
+    },
+
     findFirstRouteGeofenceIntersection(startLat, startLon, endLat, endLon) {
       const polygon = this.normalizeGeofencePoints(this.geofencePoints)
       if (polygon.length < 3) return null
@@ -1671,22 +1805,23 @@ export default {
 
       const droneLat = Number(this.dronePos?.lat)
       const droneLon = Number(this.dronePos?.lon)
-      const stopDistance = this.sanitizeGeofenceStopDistance()
+      const fallbackTarget = this.resolveTargetFromGeofence(targetLat, targetLon)
 
       if (!Number.isFinite(droneLat) || !Number.isFinite(droneLon) || this.geofencePoints.length < 3) {
-        return { lat: targetLat, lon: targetLon, adjusted: false }
+        return fallbackTarget
       }
 
       const hit = this.findFirstRouteGeofenceIntersection(droneLat, droneLon, targetLat, targetLon)
       if (!hit) {
-        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
+        return fallbackTarget
       }
 
       const distanceToIntersection = hit.routeLength * hit.t
       if (distanceToIntersection <= 0) {
-        return { lat: targetLat, lon: targetLon, adjusted: false, appliedBackoffMeters: 0 }
+        return fallbackTarget
       }
 
+      const stopDistance = this.sanitizeGeofenceStopDistance()
       const backoffMeters = Math.min(stopDistance, distanceToIntersection)
       const unitBackX = (hit.start.x - hit.x) / distanceToIntersection
       const unitBackY = (hit.start.y - hit.y) / distanceToIntersection
@@ -1701,7 +1836,8 @@ export default {
         lat: Number(adjusted.lat.toFixed(7)),
         lon: Number(adjusted.lon.toFixed(7)),
         adjusted: true,
-        appliedBackoffMeters: backoffMeters
+        appliedBackoffMeters: backoffMeters,
+        reference: 'route'
       }
     },
 
