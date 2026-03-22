@@ -155,7 +155,9 @@ class ProcessedVideoTrack(VideoStreamTrack):
         if abs(self.smoothed_offset_ratio) <= tracking_deadband_ratio:
             direction = "center"
         else:
-            direction = "right" if self.smoothed_offset_ratio > 0 else "left"
+            # Si la persona aparece a la derecha, el dron debe desplazarse a la izquierda
+            # para recentrarla manteniendo la camara orientada al frente.
+            direction = "left" if self.smoothed_offset_ratio > 0 else "right"
 
         box_width_px = max(1, x2 - x1)
         half_fov_rad = math.radians(camera_horizontal_fov_deg / 2)

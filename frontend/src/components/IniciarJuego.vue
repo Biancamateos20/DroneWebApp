@@ -426,7 +426,7 @@ export default {
       return 'tracking-center'
     },
     cameraTrackingMarkerStyle() {
-      const left = 50 + (this.cameraTrackingNormalizedOffset * 44)
+      const left = 50 - (this.cameraTrackingNormalizedOffset * 44)
       return { left: `${Math.max(6, Math.min(94, left))}%` }
     },
     registeredPlayers() {
