@@ -90,14 +90,14 @@ async function startStream() {
       video: selectedCameraId.value
         ? {
             deviceId: { exact: selectedCameraId.value },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30, max: 30 }
+            width: { ideal: 960, max: 960 },
+            height: { ideal: 540, max: 540 },
+            frameRate: { ideal: 24, max: 24 }
           }
         : {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30, max: 30 }
+            width: { ideal: 960, max: 960 },
+            height: { ideal: 540, max: 540 },
+            frameRate: { ideal: 24, max: 24 }
           },
       audio: false
     });
@@ -105,7 +105,11 @@ async function startStream() {
     localVideo.value.srcObject = localStream;
 
     localStream.getTracks().forEach(track => {
-      pc.addTrack(track, localStream);
+      if ("contentHint" in track) {
+        track.contentHint = "motion";
+      }
+      const sender = pc.addTrack(track, localStream);
+      applySenderQualityProfile(sender);
     });
 
     const offer = await pc.createOffer();
@@ -146,6 +150,28 @@ function cleanup() {
   if (pc) {
     pc.close();
     pc = null;
+  }
+}
+
+function applySenderQualityProfile(sender) {
+  if (!sender || typeof sender.getParameters !== "function" || typeof sender.setParameters !== "function") {
+    return;
+  }
+
+  try {
+    const params = sender.getParameters() || {};
+    if (!Array.isArray(params.encodings) || !params.encodings.length) {
+      params.encodings = [{}];
+    }
+    params.encodings[0] = {
+      ...params.encodings[0],
+      maxBitrate: 2500000,
+      maxFramerate: 24,
+      scaleResolutionDownBy: 1
+    };
+    sender.setParameters(params).catch?.(() => {});
+  } catch (err) {
+    console.warn("No se pudieron aplicar parametros RTC de calidad:", err);
   }
 }
 

@@ -220,14 +220,29 @@
         <p v-if="cameraError" class="mini-error">{{ cameraError }}</p>
       </div>
 
-      <div class="camera-grid">
-        <div class="camera-card local">
-          <div class="camera-title">Local</div>
-          <video ref="localVideo" autoplay playsinline muted></video>
+      <div class="camera-stage">
+        <div class="tracking-panel">
+          <div class="tracking-head">
+            <span class="tracking-label">Corrección horizontal</span>
+            <strong :class="cameraTrackingDirectionClass">{{ cameraTrackingHeadline }}</strong>
+          </div>
+          <div class="tracking-bar" aria-label="Corrección horizontal">
+            <span class="tracking-center-line"></span>
+            <span class="tracking-safe-zone"></span>
+            <span class="tracking-marker" :style="cameraTrackingMarkerStyle"></span>
+          </div>
+          <p class="tracking-meta">{{ cameraTrackingDetail }}</p>
         </div>
-        <div class="camera-card remote">
-          <div class="camera-title">Procesado</div>
-          <video ref="remoteVideo" autoplay playsinline muted></video>
+
+        <div class="camera-grid">
+          <div class="camera-card local">
+            <div class="camera-title">Local</div>
+            <video ref="localVideo" autoplay playsinline muted></video>
+          </div>
+          <div class="camera-card remote">
+            <div class="camera-title">Procesado</div>
+            <video ref="remoteVideo" autoplay playsinline muted></video>
+          </div>
         </div>
       </div>
     </section>
@@ -328,6 +343,9 @@ export default {
       cameraZoom: 'none',
       pc: null,
       localStream: null,
+      cameraTracking: null,
+      cameraTrackingTimer: null,
+      cameraTrackingPending: false,
 
       gpsAccuracy: null,
       gpsTimestamp: null,
@@ -368,6 +386,48 @@ export default {
         : this.cameraZoom === 'remote'
           ? 'zoom-remote'
           : 'zoom-none'
+    },
+    cameraTrackingNormalizedOffset() {
+      const value = Number(this.cameraTracking?.offsetRatio)
+      if (!Number.isFinite(value)) return 0
+      return Math.max(-1, Math.min(1, value))
+    },
+    cameraTrackingHeadline() {
+      const status = this.cameraTracking?.status
+      const direction = this.cameraTracking?.direction
+      const meters = Number(this.cameraTracking?.recommendedMoveM || 0)
+
+      if (status === 'tracking' && direction === 'left') {
+        return `Mover a la izquierda ${meters.toFixed(2)} m`
+      }
+      if (status === 'tracking' && direction === 'right') {
+        return `Mover a la derecha ${meters.toFixed(2)} m`
+      }
+      if (status === 'tracking' && direction === 'center') {
+        return 'Objetivo centrado'
+      }
+      if (status === 'stale') {
+        return 'Esperando frames recientes'
+      }
+      return 'Sin persona detectada'
+    },
+    cameraTrackingDetail() {
+      const tracking = this.cameraTracking
+      if (!tracking || tracking.status !== 'tracking') {
+        return 'La guía se actualizará cuando el detector vea una persona.'
+      }
+
+      return `Corrección lateral estimada ${Number(tracking.recommendedMoveM || 0).toFixed(2)} m · persona a ${Number(tracking.estimatedDistanceM || 0).toFixed(2)} m`
+    },
+    cameraTrackingDirectionClass() {
+      const direction = this.cameraTracking?.direction
+      if (direction === 'left') return 'tracking-left'
+      if (direction === 'right') return 'tracking-right'
+      return 'tracking-center'
+    },
+    cameraTrackingMarkerStyle() {
+      const left = 50 + (this.cameraTrackingNormalizedOffset * 44)
+      return { left: `${Math.max(6, Math.min(94, left))}%` }
     },
     registeredPlayers() {
       return Object.values(this.playersByAlias)
@@ -448,7 +508,7 @@ export default {
     }
   },
 
-  beforeUnmount() {
+    beforeUnmount() {
     if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
     this.cleanupCamera()
     if (navigator.mediaDevices && navigator.mediaDevices.ondevicechange === this.deviceChangeHandler) {
@@ -470,6 +530,14 @@ export default {
   methods: {
     setCameraZoom(mode) {
       this.cameraZoom = mode
+    },
+    getWebRtcBaseUrl() {
+      const configured = String(process.env.VUE_APP_WEBRTC_TARGET || '').trim().replace(/\/$/, '')
+      return configured || '/webrtc'
+    },
+    getWebRtcUrl(path) {
+      const normalizedPath = String(path || '').startsWith('/') ? path : `/${path}`
+      return `${this.getWebRtcBaseUrl()}${normalizedPath}`
     },
     initMqtt() {
       const mqttLib = typeof window !== 'undefined' ? window.mqtt : null
@@ -1805,20 +1873,25 @@ export default {
 
       const droneLat = Number(this.dronePos?.lat)
       const droneLon = Number(this.dronePos?.lon)
-      const fallbackTarget = this.resolveTargetFromGeofence(targetLat, targetLon)
+      const directTarget = {
+        lat: targetLat,
+        lon: targetLon,
+        adjusted: false,
+        appliedBackoffMeters: 0
+      }
 
       if (!Number.isFinite(droneLat) || !Number.isFinite(droneLon) || this.geofencePoints.length < 3) {
-        return fallbackTarget
+        return this.resolveTargetFromGeofence(targetLat, targetLon)
       }
 
       const hit = this.findFirstRouteGeofenceIntersection(droneLat, droneLon, targetLat, targetLon)
       if (!hit) {
-        return fallbackTarget
+        return directTarget
       }
 
       const distanceToIntersection = hit.routeLength * hit.t
       if (distanceToIntersection <= 0) {
-        return fallbackTarget
+        return directTarget
       }
 
       const stopDistance = this.sanitizeGeofenceStopDistance()
@@ -2487,14 +2560,14 @@ export default {
           video: this.selectedCameraId
             ? {
                 deviceId: { exact: this.selectedCameraId },
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-                frameRate: { ideal: 30, max: 30 }
+                width: { ideal: 960, max: 960 },
+                height: { ideal: 540, max: 540 },
+                frameRate: { ideal: 24, max: 24 }
               }
             : {
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-                frameRate: { ideal: 30, max: 30 }
+                width: { ideal: 960, max: 960 },
+                height: { ideal: 540, max: 540 },
+                frameRate: { ideal: 24, max: 24 }
               },
           audio: false
         })
@@ -2503,16 +2576,18 @@ export default {
         if (localVideo) localVideo.srcObject = this.localStream
 
         this.localStream.getTracks().forEach(track => {
-          this.pc.addTrack(track, this.localStream)
+          if ('contentHint' in track) {
+            track.contentHint = 'motion'
+          }
+          const sender = this.pc.addTrack(track, this.localStream)
+          this.applySenderQualityProfile(sender)
         })
 
         const offer = await this.pc.createOffer()
         await this.pc.setLocalDescription(offer)
         await this.waitForIceGathering(this.pc)
 
-        const offerUrl = (process.env.VUE_APP_WEBRTC_TARGET
-          ? `${process.env.VUE_APP_WEBRTC_TARGET.replace(/\/$/, '')}/offer`
-          : '/webrtc/offer')
+        const offerUrl = this.getWebRtcUrl('/offer')
 
         const response = await fetch(offerUrl, {
           method: 'POST',
@@ -2525,6 +2600,7 @@ export default {
 
         const answer = await response.json()
         await this.pc.setRemoteDescription(answer)
+        this.startCameraTrackingPolling()
       } catch (e) {
         this.cameraError = e.message || 'Error iniciando cámara'
         this.cleanupCamera()
@@ -2532,6 +2608,7 @@ export default {
     },
 
     cleanupCamera() {
+      this.stopCameraTrackingPolling()
       if (this.localStream) {
         this.localStream.getTracks().forEach(t => t.stop())
         this.localStream = null
@@ -2544,6 +2621,68 @@ export default {
       if (localVideo) localVideo.srcObject = null
       const remoteVideo = this.$refs.remoteVideo
       if (remoteVideo) remoteVideo.srcObject = null
+    },
+
+    startCameraTrackingPolling() {
+      this.stopCameraTrackingPolling()
+      this.pollCameraTracking()
+      this.cameraTrackingTimer = window.setInterval(() => {
+        this.pollCameraTracking()
+      }, 800)
+    },
+
+    stopCameraTrackingPolling() {
+      if (this.cameraTrackingTimer) {
+        window.clearInterval(this.cameraTrackingTimer)
+      }
+      this.cameraTrackingTimer = null
+      this.cameraTrackingPending = false
+      this.cameraTracking = null
+    },
+
+    async pollCameraTracking() {
+      if (!this.cameraActive || this.cameraTrackingPending) return
+      this.cameraTrackingPending = true
+
+      try {
+        const response = await fetch(this.getWebRtcUrl('/tracking'), {
+          method: 'GET',
+          cache: 'no-store'
+        })
+
+        if (!response.ok) {
+          throw new Error(`Tracking HTTP ${response.status}`)
+        }
+
+        const payload = await response.json()
+        this.cameraTracking = payload
+      } catch (e) {
+        console.warn('No se pudo obtener tracking horizontal:', e)
+      } finally {
+        this.cameraTrackingPending = false
+      }
+    },
+
+    applySenderQualityProfile(sender) {
+      if (!sender || typeof sender.getParameters !== 'function' || typeof sender.setParameters !== 'function') {
+        return
+      }
+
+      try {
+        const params = sender.getParameters() || {}
+        if (!Array.isArray(params.encodings) || !params.encodings.length) {
+          params.encodings = [{}]
+        }
+        params.encodings[0] = {
+          ...params.encodings[0],
+          maxBitrate: 2_500_000,
+          maxFramerate: 24,
+          scaleResolutionDownBy: 1
+        }
+        sender.setParameters(params).catch?.(() => {})
+      } catch (e) {
+        console.warn('No se pudieron aplicar parametros RTC de calidad:', e)
+      }
     },
 
     waitForIceGathering(pc) {
@@ -2951,6 +3090,13 @@ export default {
   align-content: start;
 }
 
+.camera-stage {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 8px;
+  min-height: 0;
+}
+
 .camera-toolbar {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2972,6 +3118,7 @@ export default {
   padding: 6px;
   display: flex;
   flex-direction: column;
+  gap: 8px;
   min-height: 0;
   overflow: hidden;
 }
@@ -2982,14 +3129,98 @@ export default {
   margin-bottom: 6px;
 }
 
+.tracking-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(16, 26, 36, 0.96), rgba(8, 13, 18, 0.92));
+  border: 1px solid #203246;
+}
+
+.tracking-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.83rem;
+}
+
+.tracking-label {
+  color: #8ea3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+}
+
+.tracking-left {
+  color: #f59e0b;
+}
+
+.tracking-right {
+  color: #38bdf8;
+}
+
+.tracking-center {
+  color: #22c55e;
+}
+
+.tracking-bar {
+  position: relative;
+  height: 16px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.22), rgba(34, 197, 94, 0.18), rgba(56, 189, 248, 0.22));
+  overflow: hidden;
+}
+
+.tracking-center-line {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.85);
+  transform: translateX(-50%);
+}
+
+.tracking-safe-zone {
+  position: absolute;
+  left: 46%;
+  top: 2px;
+  bottom: 2px;
+  width: 8%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.tracking-marker {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #f8fafc;
+  border: 2px solid #0f172a;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.18);
+}
+
+.tracking-meta {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #b7c5d4;
+  text-align: left;
+}
+
 .camera-card video {
   width: 100%;
-  height: auto;
+  height: 100%;
   max-height: 100%;
+  min-height: 0;
   background: #05070a;
   border-radius: 8px;
   display: block;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .camera-bay.zoom-local .camera-card.remote,
