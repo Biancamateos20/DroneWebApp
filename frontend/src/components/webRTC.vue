@@ -72,9 +72,7 @@ async function startStream() {
   cleanup();
 
   try {
-    pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-    });
+    pc = new RTCPeerConnection(buildRtcConfiguration());
 
     pc.oniceconnectionstatechange = () => {
       console.log("ICE:", pc.iceConnectionState);
@@ -115,7 +113,7 @@ async function startStream() {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    await waitForIceGathering(pc);
+    await waitForIceGathering(pc, 250);
 
     const offerUrl = (process.env.VUE_APP_WEBRTC_TARGET
       ? `${process.env.VUE_APP_WEBRTC_TARGET.replace(/\/$/, "")}/offer`
@@ -175,12 +173,30 @@ function applySenderQualityProfile(sender) {
   }
 }
 
-function waitForIceGathering(pc) {
+function buildRtcConfiguration() {
+  const useStun = String(process.env.VUE_APP_WEBRTC_USE_STUN || "").trim().toLowerCase() === "true";
+  return useStun
+    ? { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }
+    : { iceServers: [] };
+}
+
+function waitForIceGathering(pc, timeoutMs = 250) {
   return new Promise(resolve => {
     if (pc.iceGatheringState === "complete") return resolve();
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, timeoutMs);
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      pc.onicegatheringstatechange = null;
+    };
 
     pc.onicegatheringstatechange = () => {
-      if (pc.iceGatheringState === "complete") resolve();
+      if (pc.iceGatheringState === "complete") {
+        cleanup();
+        resolve();
+      }
     };
   });
 }

@@ -2543,9 +2543,7 @@ export default {
       if (!this.cameraActive) return
       this.cleanupCamera()
       try {
-        this.pc = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        })
+        this.pc = new RTCPeerConnection(this.buildRtcConfiguration())
 
         this.pc.ontrack = async (event) => {
           const stream = new MediaStream([event.track])
@@ -2585,7 +2583,7 @@ export default {
 
         const offer = await this.pc.createOffer()
         await this.pc.setLocalDescription(offer)
-        await this.waitForIceGathering(this.pc)
+        await this.waitForIceGathering(this.pc, 250)
 
         const offerUrl = this.getWebRtcUrl('/offer')
 
@@ -2685,11 +2683,29 @@ export default {
       }
     },
 
-    waitForIceGathering(pc) {
+    buildRtcConfiguration() {
+      const useStun = String(process.env.VUE_APP_WEBRTC_USE_STUN || '').trim().toLowerCase() === 'true'
+      return useStun
+        ? { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+        : { iceServers: [] }
+    },
+
+    waitForIceGathering(pc, timeoutMs = 250) {
       return new Promise(resolve => {
         if (pc.iceGatheringState === 'complete') return resolve()
+        const timer = window.setTimeout(() => {
+          cleanup()
+          resolve()
+        }, timeoutMs)
+        const cleanup = () => {
+          window.clearTimeout(timer)
+          pc.onicegatheringstatechange = null
+        }
         pc.onicegatheringstatechange = () => {
-          if (pc.iceGatheringState === 'complete') resolve()
+          if (pc.iceGatheringState === 'complete') {
+            cleanup()
+            resolve()
+          }
         }
       })
     },
@@ -3077,10 +3093,11 @@ export default {
   padding: 12px;
   margin-bottom: 8px;
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 220px 1fr;
   gap: 12px;
-  height: 24vh;
-  min-height: 200px;
+  height: 38vh;
+  min-height: 340px;
+  max-height: 560px;
   align-items: stretch;
 }
 

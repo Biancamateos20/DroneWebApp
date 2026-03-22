@@ -10,8 +10,6 @@ from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
     VideoStreamTrack,
-    RTCConfiguration,
-    RTCIceServer,
 )
 from av import VideoFrame
 
@@ -263,28 +261,14 @@ async def offer(request):
         type=params["type"]
     )
 
-    pc = RTCPeerConnection(
-        RTCConfiguration(
-            iceServers=[RTCIceServer(urls="stun:stun.l.google.com:19302")]
-        )
-    )
+    pc = RTCPeerConnection()
 
     pcs.add(pc)
 
     @pc.on("track")
     def on_track(track):
         if track.kind == "video":
-            sender = pc.addTrack(ProcessedVideoTrack(track))
-            try:
-                params = sender.getParameters()
-                if not params.encodings:
-                    params.encodings = [{}]
-                params.encodings[0]["maxBitrate"] = 2_500_000
-                params.encodings[0]["maxFramerate"] = 24
-                params.encodings[0]["scaleResolutionDownBy"] = 1.0
-                sender.setParameters(params)
-            except Exception as e:
-                print("⚠️ No se pudo ajustar bitrate:", e)
+            pc.addTrack(ProcessedVideoTrack(track))
 
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
