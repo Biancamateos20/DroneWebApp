@@ -1,10 +1,14 @@
 import cv2
 import math
+import numpy as np
+import os
 import time
 from aiohttp import web
 import aiohttp_cors
 from ultralytics import YOLO
 import asyncio
+import glob
+import yaml
 
 from aiortc import (
     RTCPeerConnection,
@@ -37,11 +41,96 @@ latest_tracking = {
 camera_horizontal_fov_deg = 69.0
 tracking_deadband_ratio = 0.04
 reference_person_width_m = 0.45
+calibration_file_env = "DRONE_CALIBRATION_YAML"
+calibration_alpha = 0.0
+
+
+def resolve_calibration_file():
+    explicit = os.environ.get(calibration_file_env, "").strip()
+    if explicit:
+        return explicit
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "calibration_data_px.yaml"),
+        os.path.join(here, "output", "calibration_data_px.yaml"),
+        os.path.join(here, "output21", "calibration_data_px.yaml"),
+    ]
+    candidates.extend(sorted(glob.glob(os.path.join(here, "output*", "calibration_data_px.yaml"))))
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def load_calibration():
+    calibration_path = resolve_calibration_file()
+    if not calibration_path:
+        print("ℹ️ No se encontró YAML de calibración. El stream RTC se enviará sin corregir.")
+        return None
+
+    try:
+        with open(calibration_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        camera_matrix = data.get("camera_matrix")
+        distortion_coefficients = data.get("distortion_coefficients")
+        if camera_matrix is None or distortion_coefficients is None:
+            raise ValueError("Faltan camera_matrix o distortion_coefficients")
+
+        calibration = {
+            "path": calibration_path,
+            "camera_matrix": np.array(camera_matrix, dtype=np.float32),
+            "distortion_coefficients": np.array(distortion_coefficients, dtype=np.float32),
+            "maps": {}
+        }
+        print(f"✅ Calibración cargada desde {calibration_path}")
+        return calibration
+    except Exception as e:
+        print(f"⚠️ No se pudo cargar la calibración desde {calibration_path}: {e}")
+        return None
+
+
+calibration_state = load_calibration()
 
 
 def update_latest_tracking(payload):
     global latest_tracking
     latest_tracking = payload
+
+
+def undistort_frame(img):
+    if calibration_state is None:
+        return img
+
+    frame_height, frame_width = img.shape[:2]
+    key = (frame_width, frame_height)
+    maps = calibration_state["maps"].get(key)
+
+    if maps is None:
+        camera_matrix = calibration_state["camera_matrix"]
+        distortion = calibration_state["distortion_coefficients"]
+        optimal_matrix, _roi = cv2.getOptimalNewCameraMatrix(
+            camera_matrix,
+            distortion,
+            (frame_width, frame_height),
+            calibration_alpha,
+            (frame_width, frame_height)
+        )
+        map_x, map_y = cv2.initUndistortRectifyMap(
+            camera_matrix,
+            distortion,
+            None,
+            optimal_matrix,
+            (frame_width, frame_height),
+            cv2.CV_32FC1
+        )
+        maps = (map_x, map_y)
+        calibration_state["maps"][key] = maps
+
+    map_x, map_y = maps
+    return cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
 class ProcessedVideoTrack(VideoStreamTrack):
 
@@ -198,6 +287,7 @@ class ProcessedVideoTrack(VideoStreamTrack):
             pass
 
         img = frame.to_ndarray(format="bgr24")
+        img = undistort_frame(img)
         frame_height, frame_width = img.shape[:2]
 
         now = time.time()
