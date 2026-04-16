@@ -59,8 +59,22 @@
         </p>
 
         <div class="lab-grid">
-          <div class="lab-group">
-            <div class="lab-title">Dron</div>
+          <div class="lab-group" :class="{ 'workflow-ready': droneConnected, 'workflow-active': droneInAir }">
+            <div class="lab-title-row">
+              <span class="lab-step">Paso 1</span>
+              <div class="lab-title">Dron</div>
+            </div>
+            <p class="mini-note">Conecta primero el dron. Después ya podrás despegar y ajustar su velocidad.</p>
+            <div class="panel-actions lab-actions">
+              <button
+                class="btn"
+                :class="droneConnected ? 'danger' : 'neutral'"
+                @click="connectDrone"
+                :disabled="connectLoading"
+              >
+                {{ droneConnected ? 'Desconectar dron' : 'Conectar dron' }}
+              </button>
+            </div>
             <label class="mini-field">
               <span>Altura despegue (m)</span>
               <input v-model.number="takeoffAlt" type="number" min="1" max="120" step="1" />
@@ -76,19 +90,13 @@
                 @change="sanitizeGotoSpeed"
               />
             </label>
-            <div class="panel-actions lab-actions">
+            <div class="btn-pair">
               <button
-                class="btn neutral"
+                class="btn info"
                 @click="sendDroneSpeed"
-                :disabled="speedLoading || !mqttConnected"
+                :disabled="speedLoading || !speedControlReady"
               >
                 {{ speedLoading ? 'Enviando velocidad…' : 'Enviar velocidad' }}
-              </button>
-            </div>
-            <p v-if="speedError" class="mini-error">{{ speedError }}</p>
-            <div class="panel-actions lab-actions">
-              <button class="btn neutral" @click="connectDrone" :disabled="connectLoading">
-                {{ droneConnected ? 'Desconectar' : 'Conectar dron' }}
               </button>
               <button
                 class="btn"
@@ -98,28 +106,33 @@
               >
                 {{ droneInAir ? '⬇ Land' : '🚀 Despegar' }}
               </button>
-              <button
-                class="btn goto"
-                @click="gotoAdmin"
-                :disabled="gotoLoading || !droneConnected || !droneInAir || !adminPos"
-                title="Ir a la ubicación del administrador"
-              >
-                🧭 Ir al admin
-              </button>
             </div>
+            <p class="mini-note">{{ speedControlStatus }}</p>
+            <p v-if="speedError" class="mini-error">{{ speedError }}</p>
           </div>
 
-          <div class="lab-group">
-            <div class="lab-title">Cámara</div>
+          <div class="lab-group" :class="{ 'workflow-ready': droneInAir, 'workflow-active': cameraActive || centerImageModeActive }">
+            <div class="lab-title-row">
+              <span class="lab-step">Paso 2</span>
+              <div class="lab-title">Cámara</div>
+            </div>
+            <p class="mini-note">Con el dron despegado, activa la cámara y luego inicia el centrado automático.</p>
             <div class="panel-actions lab-actions">
-              <button class="btn cam" @click="toggleCamera" :disabled="cameraLoading">
+              <button class="btn" :class="cameraActive ? 'neutral' : 'cam'" @click="toggleCamera" :disabled="cameraLoading">
                 {{ cameraActive ? '⏹ Cerrar cámara' : '🎥 Activar cámara' }}
               </button>
-              <button class="btn photo" @click="hacerFoto" :disabled="photoLoading">
+              <button
+                class="btn center"
+                @click="toggleCenterImageMode"
+                :disabled="!centerImageReady"
+              >
+                {{ centerImageModeActive ? '⏹ Parar centrado' : '🎯 Centrar imagen' }}
+              </button>
+              <button class="btn photo" @click="hacerFoto" :disabled="photoLoading || !cameraActive">
                 📸 Foto
               </button>
             </div>
-            <p v-if="cameraActive" class="mini-note">Vista de cámara activa</p>
+            <p class="mini-note">{{ centerImageStatus }}</p>
           </div>
 
           <div class="lab-group">
@@ -157,8 +170,12 @@
             <p v-if="geofenceError" class="mini-error">{{ geofenceError }}</p>
           </div>
 
-          <div class="lab-group">
-            <div class="lab-title">Modo objetivo</div>
+          <div class="lab-group" :class="{ 'workflow-ready': gotoReady }">
+            <div class="lab-title-row">
+              <span class="lab-step">Paso 3</span>
+              <div class="lab-title">Objetivo</div>
+            </div>
+            <p class="mini-note">Cuando el dron ya esté volando, podrás mandarlo al admin o al jugador elegido.</p>
 
             <label class="mini-field">
               <span>Parada antes del geofence (m)</span>
@@ -174,6 +191,18 @@
             <p v-if="canApplyGeofenceStopDistance" class="mini-note">
               El mapa marca en vivo la parada prevista antes del geofence para el admin y el jugador seleccionado.
             </p>
+            <p class="mini-note">{{ gotoStatus }}</p>
+
+            <div class="panel-actions lab-actions">
+              <button
+                class="btn goto"
+                @click="gotoAdmin"
+                :disabled="gotoLoading || !gotoReady || !adminPos"
+                title="Ir a la ubicación del administrador"
+              >
+                🧭 Ir al admin
+              </button>
+            </div>
 
             <div v-if="registeredPlayers.length" class="player-list">
               <button
@@ -368,6 +397,7 @@ export default {
         land: (process.env.VUE_APP_MQTT_TOPIC_LAND || 'mobileFlask/demoDash/Land').trim(),
         goto: (process.env.VUE_APP_MQTT_TOPIC_GOTO || 'mobileFlask/demoDash/GoTo').trim(),
         speed: (process.env.VUE_APP_MQTT_TOPIC_SPEED || 'mobileFlask/demoDash/speed').trim(),
+        centrarImagen: (process.env.VUE_APP_MQTT_TOPIC_CENTRARIMAGEN || 'mobileFlask/demoDash/centrarimagen').trim(),
         geofence: (process.env.VUE_APP_MQTT_TOPIC_GEOFENCE || 'mobileFlask/demoDash/setGeofence').trim()
       },
       telemetryAlt: null,
@@ -398,6 +428,8 @@ export default {
       droneInAir: false,
       takeoffAlt: 5,
       gotoSpeed: 1.0,
+      centerImageModeActive: false,
+      lastCenterImageCommand: 'Stop',
       speedLoading: false,
       speedError: null,
 
@@ -545,6 +577,32 @@ export default {
       if (this.droneAltTrend === 'up') return `Subiendo${speedText}`
       if (this.droneAltTrend === 'down') return `Bajando${speedText}`
       return `Altitud estable${speedText}`
+    },
+    speedControlReady() {
+      return this.mqttConnected && this.droneConnected
+    },
+    centerImageReady() {
+      return this.droneConnected && this.droneInAir && this.cameraActive
+    },
+    gotoReady() {
+      return this.droneConnected && this.droneInAir
+    },
+    speedControlStatus() {
+      if (!this.mqttConnected) return 'Conecta MQTT para poder enviar la velocidad.'
+      if (!this.droneConnected) return 'Conecta el dron antes de aplicar la velocidad de navegación.'
+      return `Velocidad preparada: ${this.sanitizedGotoSpeed.toFixed(1)} m/s`
+    },
+    centerImageStatus() {
+      if (!this.droneConnected) return 'Primero conecta el dron.'
+      if (!this.droneInAir) return 'Despega el dron antes de iniciar el centrado.'
+      if (!this.cameraActive) return 'Activa la cámara para poder centrar la imagen.'
+      if (this.centerImageModeActive) return 'Centrado automático activo. Se enviará Stop cuando lo detengas o se cierre el flujo.'
+      return 'Todo listo para lanzar el centrado automático.'
+    },
+    gotoStatus() {
+      if (!this.droneConnected) return 'Conecta el dron para habilitar la navegación.'
+      if (!this.droneInAir) return 'Despega el dron antes de enviar un GOTO.'
+      return 'Ya puedes enviarlo al admin o al jugador seleccionado.'
     },
     canApplyGeofenceStopDistance() {
       return this.geofencePoints.length >= 3
@@ -745,6 +803,45 @@ export default {
           resolve()
         })
       })
+    },
+
+    getCenterImageCommand(tracking = this.cameraTracking) {
+      if (!tracking || tracking.status !== 'tracking') return 'Stop'
+      if (tracking.direction === 'left') return 'Left'
+      if (tracking.direction === 'right') return 'Right'
+      return 'Stop'
+    },
+
+    async setCenterImageCommand(command) {
+      const normalized = ['Left', 'Right', 'Stop'].includes(command) ? command : 'Stop'
+      if (!this.mqttConnected) {
+        this.lastCenterImageCommand = 'Stop'
+        return
+      }
+      if (normalized === this.lastCenterImageCommand) return
+      await this.mqttPublish(this.mqttTopics.centrarImagen, normalized)
+      this.lastCenterImageCommand = normalized
+    },
+
+    async syncCenterImageCommand(tracking = this.cameraTracking) {
+      const canSendLiveCommand = this.centerImageModeActive && this.cameraActive && this.droneConnected && this.droneInAir
+      const nextCommand = canSendLiveCommand ? this.getCenterImageCommand(tracking) : 'Stop'
+
+      try {
+        await this.setCenterImageCommand(nextCommand)
+      } catch (e) {
+        console.warn('No se pudo publicar centrarimagen:', e)
+      }
+    },
+
+    async toggleCenterImageMode() {
+      const nextState = !this.centerImageModeActive
+      this.centerImageModeActive = nextState
+      if (nextState) {
+        await this.syncCenterImageCommand(this.cameraTracking)
+        return
+      }
+      await this.setCenterImageCommand('Stop').catch(() => {})
     },
 
     buildConnectPayload() {
@@ -2450,6 +2547,9 @@ export default {
       this.photoError = null
       this.photoLoading = true
       try {
+        this.centerImageModeActive = false
+        await this.setCenterImageCommand('Stop').catch(() => {})
+
         const remoteVideo = this.$refs.remoteVideo
         if (this.cameraActive && remoteVideo && remoteVideo.videoWidth > 0 && remoteVideo.videoHeight > 0) {
           const canvas = document.createElement('canvas')
@@ -2457,7 +2557,11 @@ export default {
           canvas.height = remoteVideo.videoHeight
           const ctx = canvas.getContext('2d')
           if (!ctx) throw new Error('No se pudo crear el canvas')
+          ctx.save()
+          ctx.translate(canvas.width, 0)
+          ctx.scale(-1, 1)
           ctx.drawImage(remoteVideo, 0, 0, canvas.width, canvas.height)
+          ctx.restore()
 
           const blob = await new Promise((resolve, reject) => {
             canvas.toBlob(
@@ -2486,6 +2590,8 @@ export default {
       try {
         await this.mqttPublish(this.mqttTopics.land)
         this.droneInAir = false
+        this.centerImageModeActive = false
+        await this.syncCenterImageCommand(null)
       } catch (e) {
         this.landError = e.message || 'Error enviando LAND'
       } finally {
@@ -2524,6 +2630,8 @@ export default {
       this.connectLoading = true
       try {
         if (this.droneConnected) {
+          this.centerImageModeActive = false
+          await this.setCenterImageCommand('Stop').catch(() => {})
           await this.mqttPublish(this.mqttTopics.disconnect)
           this.droneConnected = false
           this.droneInAir = false
@@ -2606,6 +2714,7 @@ export default {
     async toggleCamera() {
       this.cameraError = null
       if (this.cameraActive) {
+        this.centerImageModeActive = false
         this.cleanupCamera()
         this.cameraActive = false
         this.cameraZoom = 'none'
@@ -2713,6 +2822,8 @@ export default {
     },
 
     cleanupCamera() {
+      this.centerImageModeActive = false
+      this.syncCenterImageCommand(null).catch(() => {})
       this.stopCameraTrackingPolling()
       if (this.localStream) {
         this.localStream.getTracks().forEach(t => t.stop())
@@ -2761,8 +2872,10 @@ export default {
 
         const payload = await response.json()
         this.cameraTracking = payload
+        await this.syncCenterImageCommand(payload)
       } catch (e) {
         console.warn('No se pudo obtener tracking horizontal:', e)
+        await this.syncCenterImageCommand(null)
       } finally {
         this.cameraTrackingPending = false
       }
@@ -3228,6 +3341,38 @@ export default {
   flex-direction: column;
   gap: 10px;
   backdrop-filter: blur(8px);
+}
+
+.lab-group.workflow-ready {
+  border-color: rgba(73, 245, 161, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(73, 245, 161, 0.06);
+}
+
+.lab-group.workflow-active {
+  border-color: rgba(99, 165, 255, 0.26);
+  box-shadow: inset 0 0 0 1px rgba(99, 165, 255, 0.1), 0 18px 34px rgba(4, 8, 18, 0.22);
+}
+
+.lab-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lab-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(240, 244, 250, 0.76);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .lab-title {
@@ -3706,6 +3851,11 @@ export default {
 .btn.cam {
   background: linear-gradient(135deg, #b9c4ff, #95a9ff);
   color: #1a1f48;
+}
+
+.btn.center {
+  background: linear-gradient(135deg, #ffd98a, #ffb14b);
+  color: #412300;
 }
 
 .btn.takeoff {
