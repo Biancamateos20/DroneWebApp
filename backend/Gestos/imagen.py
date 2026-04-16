@@ -64,6 +64,49 @@ def resolve_calibration_file():
     return None
 
 
+def parse_calibration_size(data):
+    image_size = data.get("image_size")
+    if isinstance(image_size, (list, tuple)) and len(image_size) == 2:
+        width = int(image_size[0])
+        height = int(image_size[1])
+        if width > 0 and height > 0:
+            return (width, height)
+
+    frame_size = data.get("frame_size")
+    if isinstance(frame_size, dict):
+        width = int(frame_size.get("width", 0) or 0)
+        height = int(frame_size.get("height", 0) or 0)
+        if width > 0 and height > 0:
+            return (width, height)
+
+    image_width = int(data.get("image_width", 0) or 0)
+    image_height = int(data.get("image_height", 0) or 0)
+    if image_width > 0 and image_height > 0:
+        return (image_width, image_height)
+
+    return None
+
+
+def detect_calibration_size_from_images():
+    here = os.path.dirname(os.path.abspath(__file__))
+    patterns = [
+        os.path.join(here, "input*", "*.jpg"),
+        os.path.join(here, "input*", "*.jpeg"),
+        os.path.join(here, "input*", "*.png"),
+    ]
+
+    for pattern in patterns:
+        for candidate in sorted(glob.glob(pattern)):
+            img = cv2.imread(candidate)
+            if img is None:
+                continue
+            height, width = img.shape[:2]
+            if width > 0 and height > 0:
+                return (width, height)
+
+    return None
+
+
 def load_calibration():
     calibration_path = resolve_calibration_file()
     if not calibration_path:
@@ -79,13 +122,19 @@ def load_calibration():
         if camera_matrix is None or distortion_coefficients is None:
             raise ValueError("Faltan camera_matrix o distortion_coefficients")
 
+        calibration_size = parse_calibration_size(data) or detect_calibration_size_from_images()
+
         calibration = {
             "path": calibration_path,
             "camera_matrix": np.array(camera_matrix, dtype=np.float32),
             "distortion_coefficients": np.array(distortion_coefficients, dtype=np.float32),
+            "image_size": calibration_size,
             "maps": {}
         }
-        print(f"✅ Calibración cargada desde {calibration_path}")
+        if calibration_size is not None:
+            print(f"✅ Calibración cargada desde {calibration_path} para {calibration_size[0]}x{calibration_size[1]}")
+        else:
+            print(f"✅ Calibración cargada desde {calibration_path} sin tamaño de referencia; se usará el tamaño de entrada")
         return calibration
     except Exception as e:
         print(f"⚠️ No se pudo cargar la calibración desde {calibration_path}: {e}")
@@ -103,6 +152,12 @@ def update_latest_tracking(payload):
 def undistort_frame(img):
     if calibration_state is None:
         return img
+
+    target_size = calibration_state.get("image_size")
+    if target_size is not None:
+        target_width, target_height = target_size
+        if img.shape[1] != target_width or img.shape[0] != target_height:
+            img = cv2.resize(img, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
 
     frame_height, frame_width = img.shape[:2]
     key = (frame_width, frame_height)
@@ -143,8 +198,35 @@ class ProcessedVideoTrack(VideoStreamTrack):
         self.last_boxes = []
         self.pending_detection_frame = None
         self.smoothed_offset_ratio = 0.0
+        self.primary_box = None
         self.closed = False
         self.detection_task = asyncio.create_task(self._detection_loop())
+
+    @staticmethod
+    def _box_area(box):
+        return max(1, (box[2] - box[0])) * max(1, (box[3] - box[1]))
+
+    @staticmethod
+    def _box_center(box):
+        return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+
+    @staticmethod
+    def _box_iou(box_a, box_b):
+        x_left = max(box_a[0], box_b[0])
+        y_top = max(box_a[1], box_b[1])
+        x_right = min(box_a[2], box_b[2])
+        y_bottom = min(box_a[3], box_b[3])
+
+        inter_width = max(0.0, x_right - x_left)
+        inter_height = max(0.0, y_bottom - y_top)
+        intersection = inter_width * inter_height
+        if intersection <= 0.0:
+            return 0.0
+
+        area_a = ProcessedVideoTrack._box_area(box_a)
+        area_b = ProcessedVideoTrack._box_area(box_b)
+        union = max(1.0, float(area_a + area_b - intersection))
+        return float(intersection / union)
 
     def _extract_boxes(self, img):
         frame_height, frame_width = img.shape[:2]
@@ -205,11 +287,47 @@ class ProcessedVideoTrack(VideoStreamTrack):
 
     def _select_primary_box(self):
         if not self.last_boxes:
+            self.primary_box = None
             return None
-        return max(
-            self.last_boxes,
-            key=lambda box: max(1, (box[2] - box[0])) * max(1, (box[3] - box[1]))
-        )
+
+        largest_box = max(self.last_boxes, key=self._box_area)
+        largest_area = float(self._box_area(largest_box))
+
+        if self.primary_box is None:
+            self.primary_box = largest_box
+            return largest_box
+
+        prev_box = self.primary_box
+        prev_center_x, prev_center_y = self._box_center(prev_box)
+        prev_span = max(1.0, float(max(prev_box[2] - prev_box[0], prev_box[3] - prev_box[1])))
+
+        continuation_box = None
+        continuation_score = -1.0
+
+        for candidate in self.last_boxes:
+            candidate_area = float(self._box_area(candidate))
+            candidate_center_x, candidate_center_y = self._box_center(candidate)
+            center_distance = math.hypot(candidate_center_x - prev_center_x, candidate_center_y - prev_center_y)
+            center_ratio = center_distance / prev_span
+            iou = self._box_iou(prev_box, candidate)
+
+            # Mantiene la misma persona si la caja sigue cerca de la anterior.
+            if iou < 0.1 and center_ratio > 0.7:
+                continue
+
+            score = (iou * 0.65) + (max(0.0, 1.0 - min(center_ratio, 1.5)) * 0.2) + ((candidate_area / largest_area) * 0.15)
+            if score > continuation_score:
+                continuation_score = score
+                continuation_box = candidate
+
+        if continuation_box is not None:
+            continuation_area = float(self._box_area(continuation_box))
+            if continuation_area >= (largest_area * 0.72):
+                self.primary_box = continuation_box
+                return continuation_box
+
+        self.primary_box = largest_box
+        return largest_box
 
     def _build_tracking_payload(self, frame_width, frame_height):
         target = self._select_primary_box()

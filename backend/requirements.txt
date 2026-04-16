@@ -8,6 +8,7 @@ aiortc
 opencv-python-headless
 av
 numpy
+PyYAML
 mediapipe
 ultralytics 
 opencv-python

@@ -65,6 +65,17 @@
               <span>Altura despegue (m)</span>
               <input v-model.number="takeoffAlt" type="number" min="1" max="120" step="1" />
             </label>
+            <label class="mini-field">
+              <span>Velocidad GOTO (m/s)</span>
+              <input
+                v-model.number="gotoSpeed"
+                type="number"
+                min="0.1"
+                max="20"
+                step="0.1"
+                @change="sanitizeGotoSpeed"
+              />
+            </label>
             <div class="panel-actions lab-actions">
               <button class="btn neutral" @click="connectDrone" :disabled="connectLoading">
                 {{ droneConnected ? 'Desconectar' : 'Conectar dron' }}
@@ -334,6 +345,7 @@ export default {
       connectLoading: false,
       droneInAir: false,
       takeoffAlt: 5,
+      gotoSpeed: 1.0,
 
       cameraActive: false,
       cameraLoading: false,
@@ -453,6 +465,11 @@ export default {
       const value = Number(this.geofenceStopDistance)
       if (!Number.isFinite(value)) return 0
       return Math.max(0, value)
+    },
+    sanitizedGotoSpeed() {
+      const value = Number(this.gotoSpeed)
+      if (!Number.isFinite(value)) return 1.0
+      return Math.min(20, Math.max(0.1, value))
     }
   },
 
@@ -2558,13 +2575,15 @@ export default {
           video: this.selectedCameraId
             ? {
                 deviceId: { exact: this.selectedCameraId },
-                width: { ideal: 960, max: 960 },
-                height: { ideal: 540, max: 540 },
+                width: { ideal: 640, max: 640 },
+                height: { ideal: 480, max: 480 },
+                aspectRatio: { ideal: 4 / 3 },
                 frameRate: { ideal: 24, max: 24 }
               }
             : {
-                width: { ideal: 960, max: 960 },
-                height: { ideal: 540, max: 540 },
+                width: { ideal: 640, max: 640 },
+                height: { ideal: 480, max: 480 },
+                aspectRatio: { ideal: 4 / 3 },
                 frameRate: { ideal: 24, max: 24 }
               },
           audio: false
@@ -2740,12 +2759,20 @@ export default {
       this.gotoPlayerError = null
     },
 
+    sanitizeGotoSpeed() {
+      const normalized = Number(this.sanitizedGotoSpeed.toFixed(1))
+      this.gotoSpeed = normalized
+      return normalized
+    },
+
     async publishGoto(lat, lon) {
       const target = this.resolveGotoTarget(lat, lon)
+      const speed = this.sanitizeGotoSpeed()
       await this.mqttPublish(this.mqttTopics.goto, JSON.stringify({
         lat: target.lat,
         lon: target.lon,
-        h: Number(this.takeoffAlt)
+        h: Number(this.takeoffAlt),
+        speed
       }))
     },
 

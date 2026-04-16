@@ -64,7 +64,12 @@ print('Distortion coefficients:')
 print(dist)
 
 # Write calibration results to YAML file
-data = {'camera_matrix': mtx.tolist(), 'distortion_coefficients': dist.tolist(), 'rms': rms}
+data = {
+    'camera_matrix': mtx.tolist(),
+    'distortion_coefficients': dist.tolist(),
+    'image_size': [int(gray.shape[1]), int(gray.shape[0])],
+    'rms': rms
+}
 with open(yamlname, 'w') as f:
     yaml.dump(data, f)
 

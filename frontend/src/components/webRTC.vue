@@ -88,13 +88,15 @@ async function startStream() {
       video: selectedCameraId.value
         ? {
             deviceId: { exact: selectedCameraId.value },
-            width: { ideal: 960, max: 960 },
-            height: { ideal: 540, max: 540 },
+            width: { ideal: 640, max: 640 },
+            height: { ideal: 480, max: 480 },
+            aspectRatio: { ideal: 4 / 3 },
             frameRate: { ideal: 24, max: 24 }
           }
         : {
-            width: { ideal: 960, max: 960 },
-            height: { ideal: 540, max: 540 },
+            width: { ideal: 640, max: 640 },
+            height: { ideal: 480, max: 480 },
+            aspectRatio: { ideal: 4 / 3 },
             frameRate: { ideal: 24, max: 24 }
           },
       audio: false
