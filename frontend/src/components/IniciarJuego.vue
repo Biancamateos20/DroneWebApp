@@ -77,6 +77,16 @@
               />
             </label>
             <div class="panel-actions lab-actions">
+              <button
+                class="btn neutral"
+                @click="sendDroneSpeed"
+                :disabled="speedLoading || !mqttConnected"
+              >
+                {{ speedLoading ? 'Enviando velocidad…' : 'Enviar velocidad' }}
+              </button>
+            </div>
+            <p v-if="speedError" class="mini-error">{{ speedError }}</p>
+            <div class="panel-actions lab-actions">
               <button class="btn neutral" @click="connectDrone" :disabled="connectLoading">
                 {{ droneConnected ? 'Desconectar' : 'Conectar dron' }}
               </button>
@@ -248,11 +258,51 @@
         <div class="camera-grid">
           <div class="camera-card local">
             <div class="camera-title">Local</div>
-            <video ref="localVideo" autoplay playsinline muted></video>
+            <div class="camera-viewport">
+              <video ref="localVideo" class="camera-video" autoplay playsinline muted></video>
+              <div
+                v-if="cameraGuidanceVisible"
+                class="camera-guide"
+                :class="cameraGuidanceDirectionClass"
+                :style="cameraGuidanceStyle"
+              >
+                <div v-if="cameraGuidanceDirection === 'left'" class="camera-guide-side left">
+                  <span>←</span>
+                  <span>←</span>
+                  <span>←</span>
+                </div>
+                <div class="camera-guide-badge">{{ cameraGuidanceLabel }}</div>
+                <div v-if="cameraGuidanceDirection === 'right'" class="camera-guide-side right">
+                  <span>→</span>
+                  <span>→</span>
+                  <span>→</span>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="camera-card remote">
             <div class="camera-title">Procesado</div>
-            <video ref="remoteVideo" autoplay playsinline muted></video>
+            <div class="camera-viewport">
+              <video ref="remoteVideo" class="camera-video" autoplay playsinline muted></video>
+              <div
+                v-if="cameraGuidanceVisible"
+                class="camera-guide"
+                :class="cameraGuidanceDirectionClass"
+                :style="cameraGuidanceStyle"
+              >
+                <div v-if="cameraGuidanceDirection === 'left'" class="camera-guide-side left">
+                  <span>←</span>
+                  <span>←</span>
+                  <span>←</span>
+                </div>
+                <div class="camera-guide-badge">{{ cameraGuidanceLabel }}</div>
+                <div v-if="cameraGuidanceDirection === 'right'" class="camera-guide-side right">
+                  <span>→</span>
+                  <span>→</span>
+                  <span>→</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -265,6 +315,7 @@
     <p v-if="cameraLoading" class="subtitle">Activando cámara…</p>
     <p v-if="gpsLoading" class="subtitle">Consultando precisión…</p>
     <p v-if="gotoLoading" class="subtitle">Enviando GOTO…</p>
+    <p v-if="speedLoading" class="subtitle">Enviando velocidad…</p>
     <p v-if="gotoPlayerLoading" class="subtitle">Enviando GOTO al jugador…</p>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="photoError" class="error">{{ photoError }}</p>
@@ -316,6 +367,7 @@ export default {
         takeoff: (process.env.VUE_APP_MQTT_TOPIC_TAKEOFF || 'mobileFlask/demoDash/arm_takeOff').trim(),
         land: (process.env.VUE_APP_MQTT_TOPIC_LAND || 'mobileFlask/demoDash/Land').trim(),
         goto: (process.env.VUE_APP_MQTT_TOPIC_GOTO || 'mobileFlask/demoDash/GoTo').trim(),
+        speed: (process.env.VUE_APP_MQTT_TOPIC_SPEED || 'mobileFlask/demoDash/speed').trim(),
         geofence: (process.env.VUE_APP_MQTT_TOPIC_GEOFENCE || 'mobileFlask/demoDash/setGeofence').trim()
       },
       telemetryAlt: null,
@@ -346,6 +398,8 @@ export default {
       droneInAir: false,
       takeoffAlt: 5,
       gotoSpeed: 1.0,
+      speedLoading: false,
+      speedError: null,
 
       cameraActive: false,
       cameraLoading: false,
@@ -406,7 +460,7 @@ export default {
     },
     cameraTrackingHeadline() {
       const status = this.cameraTracking?.status
-      const direction = this.cameraTracking?.direction
+      const direction = this.cameraOperatorDirection
       const meters = Number(this.cameraTracking?.recommendedMoveM || 0)
 
       if (status === 'tracking' && direction === 'left') {
@@ -431,14 +485,48 @@ export default {
 
       return `Corrección lateral estimada ${Number(tracking.recommendedMoveM || 0).toFixed(2)} m · persona a ${Number(tracking.estimatedDistanceM || 0).toFixed(2)} m`
     },
-    cameraTrackingDirectionClass() {
+    cameraOperatorDirection() {
       const direction = this.cameraTracking?.direction
+      if (direction === 'left') return 'right'
+      if (direction === 'right') return 'left'
+      return 'center'
+    },
+    cameraTrackingDirectionClass() {
+      const direction = this.cameraOperatorDirection
       if (direction === 'left') return 'tracking-left'
       if (direction === 'right') return 'tracking-right'
       return 'tracking-center'
     },
+    cameraGuidanceDirection() {
+      const tracking = this.cameraTracking
+      if (!tracking || tracking.status !== 'tracking') return 'none'
+      return this.cameraOperatorDirection
+    },
+    cameraCommandNormalizedOffset() {
+      return -this.cameraTrackingNormalizedOffset
+    },
+    cameraGuidanceVisible() {
+      return this.cameraGuidanceDirection !== 'none'
+    },
+    cameraGuidanceDirectionClass() {
+      if (this.cameraGuidanceDirection === 'left') return 'guide-left'
+      if (this.cameraGuidanceDirection === 'right') return 'guide-right'
+      return 'guide-center'
+    },
+    cameraGuidanceLabel() {
+      if (this.cameraGuidanceDirection === 'left') return 'Mover izquierda'
+      if (this.cameraGuidanceDirection === 'right') return 'Mover derecha'
+      return 'Centrada'
+    },
+    cameraGuidanceStyle() {
+      const offsetPercent = Number(this.cameraTracking?.offsetPercent || 0)
+      const opacity = this.cameraGuidanceDirection === 'center'
+        ? 0.74
+        : Math.max(0.55, Math.min(1, 0.45 + (offsetPercent / 100)))
+      return { opacity: String(opacity) }
+    },
     cameraTrackingMarkerStyle() {
-      const left = 50 - (this.cameraTrackingNormalizedOffset * 44)
+      const left = 50 - (this.cameraCommandNormalizedOffset * 44)
       return { left: `${Math.max(6, Math.min(94, left))}%` }
     },
     registeredPlayers() {
@@ -2765,6 +2853,19 @@ export default {
       return normalized
     },
 
+    async sendDroneSpeed() {
+      this.speedError = null
+      this.speedLoading = true
+      try {
+        const speed = this.sanitizeGotoSpeed()
+        await this.mqttPublish(this.mqttTopics.speed, String(speed))
+      } catch (e) {
+        this.speedError = e.message || 'Error enviando velocidad'
+      } finally {
+        this.speedLoading = false
+      }
+    },
+
     async publishGoto(lat, lon) {
       const target = this.resolveGotoTarget(lat, lon)
       const speed = this.sanitizeGotoSpeed()
@@ -3327,15 +3428,108 @@ export default {
   text-align: left;
 }
 
-.camera-card video {
+.camera-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 14px;
+  background: rgba(4, 6, 10, 0.82);
+}
+
+.camera-video {
   width: 100%;
   height: 100%;
   max-height: 100%;
   min-height: 0;
-  background: rgba(4, 6, 10, 0.82);
-  border-radius: 14px;
   display: block;
   object-fit: contain;
+  transform: scaleX(-1);
+}
+
+.camera-guide {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  pointer-events: none;
+}
+
+.camera-guide-side {
+  position: absolute;
+  top: 50%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: clamp(1.8rem, 2.8vw, 2.8rem);
+  font-weight: 900;
+  text-shadow: 0 0 18px rgba(15, 23, 42, 0.72);
+}
+
+.camera-guide-side.left {
+  left: 18px;
+  color: #f59e0b;
+  animation: camera-guide-pulse-left 0.8s ease-in-out infinite alternate;
+}
+
+.camera-guide-side.right {
+  right: 18px;
+  color: #38bdf8;
+  animation: camera-guide-pulse-right 0.8s ease-in-out infinite alternate;
+}
+
+.camera-guide-badge {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #f8fafc;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.22);
+}
+
+.camera-guide.guide-center {
+  justify-content: center;
+}
+
+.camera-guide.guide-center .camera-guide-badge {
+  top: 50%;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+  background: rgba(22, 101, 52, 0.7);
+  border-color: rgba(134, 239, 172, 0.32);
+}
+
+@keyframes camera-guide-pulse-left {
+  from {
+    transform: translate(0, -50%);
+    opacity: 0.5;
+  }
+  to {
+    transform: translate(-6px, -50%);
+    opacity: 1;
+  }
+}
+
+@keyframes camera-guide-pulse-right {
+  from {
+    transform: translate(0, -50%);
+    opacity: 0.5;
+  }
+  to {
+    transform: translate(6px, -50%);
+    opacity: 1;
+  }
 }
 
 .camera-bay.zoom-local .camera-card.remote,
@@ -3348,8 +3542,8 @@ export default {
   grid-template-columns: 1fr;
 }
 
-.camera-bay.zoom-local .camera-card.local video,
-.camera-bay.zoom-remote .camera-card.remote video {
+.camera-bay.zoom-local .camera-card.local .camera-video,
+.camera-bay.zoom-remote .camera-card.remote .camera-video {
   max-height: 100%;
 }
 
