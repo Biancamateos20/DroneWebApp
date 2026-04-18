@@ -248,6 +248,32 @@ def _fetch_image_from_rtc(timeout_s: int = 12):
     return jsonify({"error": "Formato de imagen no soportado"}), 500
 
 
+def _proxy_webrtc_request(path: str, timeout_s: int = 15):
+    url = f"{IMAGE_BASE_URL}/{path.lstrip('/')}"
+    method = request.method.upper()
+
+    try:
+        if method == "POST":
+            upstream = requests.post(
+                url,
+                data=request.get_data(),
+                headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+                timeout=timeout_s
+            )
+        else:
+            upstream = requests.get(url, params=request.args, timeout=timeout_s)
+    except Exception as e:
+        print(f"Error conectando con servicio WebRTC ({path}):", e)
+        return jsonify({"error": "No se pudo conectar al servicio WebRTC"}), 502
+
+    content_type = upstream.headers.get("Content-Type", "")
+    response = Response(upstream.content, status=upstream.status_code)
+    if content_type:
+        response.headers["Content-Type"] = content_type
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/foto", methods=["POST"])
 def foto():
     # Devuelve una foto actual desde el servicio RTC.
@@ -291,11 +317,24 @@ def foto_y_land():
 
 
 @app.route("/offer", methods=["POST"])
-def webrtc():
-    # Informa que la senalizacion WebRTC esta en otro servicio.
-    return jsonify({
-        "error": "WebRTC está en el servicio dedicado (puerto 8090)"
-    }), 400
+def webrtc_offer_legacy():
+    # Compatibilidad con clientes antiguos que publican directo sobre /offer.
+    return _proxy_webrtc_request("/offer")
+
+
+@app.route("/webrtc/offer", methods=["POST"])
+def webrtc_offer():
+    return _proxy_webrtc_request("/offer")
+
+
+@app.route("/webrtc/tracking", methods=["GET"])
+def webrtc_tracking():
+    return _proxy_webrtc_request("/tracking")
+
+
+@app.route("/webrtc/snapshot", methods=["GET"])
+def webrtc_snapshot():
+    return _proxy_webrtc_request("/snapshot")
 
 
 @app.route("/estado-juego", methods=["GET"])

@@ -13,6 +13,10 @@ module.exports = defineConfig({
         target: 'http://backend:5001',
         changeOrigin: true,
         pathRewrite: { '^/api': '' }
+      },
+      '/webrtc': {
+        target: 'http://imagen:8080',
+        changeOrigin: true
       }
     }
   }

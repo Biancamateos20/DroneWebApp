@@ -695,7 +695,20 @@ export default {
       this.cameraZoom = mode
     },
     getWebRtcBaseUrl() {
-      const configured = String(process.env.VUE_APP_WEBRTC_TARGET || '').trim().replace(/\/$/, '')
+      let configured = String(process.env.VUE_APP_WEBRTC_TARGET || '').trim().replace(/\/$/, '')
+
+      try {
+        const isHttpsPage = window.location.protocol === 'https:'
+        const isHttpBase = configured.startsWith('http://')
+        const isLocalBase = /^(http:\/\/|https:\/\/)?(localhost|127\.0\.0\.1)/i.test(configured)
+        const isLocalPage = /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
+        if ((isHttpsPage && isHttpBase) || (isLocalBase && !isLocalPage)) {
+          configured = ''
+        }
+      } catch (e) {
+        // ignore
+      }
+
       return configured || '/webrtc'
     },
     getWebRtcUrl(path) {
