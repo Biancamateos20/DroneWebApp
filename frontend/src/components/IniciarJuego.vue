@@ -2614,11 +2614,7 @@ export default {
           canvas.height = remoteVideo.videoHeight
           const ctx = canvas.getContext('2d')
           if (!ctx) throw new Error('No se pudo crear el canvas')
-          ctx.save()
-          ctx.translate(canvas.width, 0)
-          ctx.scale(-1, 1)
           ctx.drawImage(remoteVideo, 0, 0, canvas.width, canvas.height)
-          ctx.restore()
 
           const blob = await new Promise((resolve, reject) => {
             canvas.toBlob(
@@ -3672,7 +3668,14 @@ export default {
   min-height: 0;
   display: block;
   object-fit: contain;
+}
+
+.camera-card.local .camera-video {
   transform: scaleX(-1);
+}
+
+.camera-card.remote .camera-video {
+  transform: none;
 }
 
 .camera-guide {

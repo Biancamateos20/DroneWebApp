@@ -3,6 +3,7 @@ import math
 import numpy as np
 import os
 import time
+import functools
 from aiohttp import web
 import aiohttp_cors
 from ultralytics import YOLO
@@ -43,6 +44,15 @@ tracking_deadband_ratio = 0.04
 reference_person_width_m = 0.45
 calibration_file_env = "DRONE_CALIBRATION_YAML"
 calibration_alpha = 0.0
+
+
+async def run_in_worker_thread(func, *args, **kwargs):
+    if hasattr(asyncio, "to_thread"):
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+    loop = asyncio.get_running_loop()
+    call = functools.partial(func, *args, **kwargs)
+    return await loop.run_in_executor(None, call)
 
 
 def resolve_calibration_file():
@@ -277,7 +287,7 @@ class ProcessedVideoTrack(VideoStreamTrack):
                     continue
 
                 try:
-                    boxes = await asyncio.to_thread(self._extract_boxes, frame)
+                    boxes = await run_in_worker_thread(self._extract_boxes, frame)
                     if boxes is not None:
                         self.last_boxes = boxes
                 except Exception as e:
