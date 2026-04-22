@@ -3675,7 +3675,7 @@ export default {
 }
 
 .camera-card.remote .camera-video {
-  transform: none;
+  transform: scaleX(1);
 }
 
 .camera-guide {

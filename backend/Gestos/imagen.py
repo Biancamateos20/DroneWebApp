@@ -416,6 +416,7 @@ class ProcessedVideoTrack(VideoStreamTrack):
 
         img = frame.to_ndarray(format="bgr24")
         img = undistort_frame(img)
+        img = cv2.flip(img, 1)
         frame_height, frame_width = img.shape[:2]
 
         now = time.time()
