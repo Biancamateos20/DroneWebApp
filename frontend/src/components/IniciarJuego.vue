@@ -423,6 +423,8 @@ export default {
       landError: null,
 
       droneMode: 'Simulacion',
+      droneSessionActive: false,
+      resetDroneOnMqttConnect: true,
       droneConnected: false,
       connectLoading: false,
       droneInAir: false,
@@ -733,6 +735,12 @@ export default {
       this.mqttClient.on('connect', () => {
         this.mqttConnected = true
         this.subscribeToMqttTopics()
+        if (this.resetDroneOnMqttConnect) {
+          this.resetDroneOnMqttConnect = false
+          this.resetDroneSession({ notifyDrone: true, stopCamera: true }).catch((e) => {
+            console.warn('No se pudo resetear el dron al iniciar la página:', e)
+          })
+        }
       })
 
       this.mqttClient.on('message', (topic, message) => {
@@ -860,6 +868,41 @@ export default {
     buildConnectPayload() {
       const mode = String(this.droneMode || '').trim().toLowerCase()
       return mode === 'real' ? 'Real' : 'Simulacion'
+    },
+
+    async resetDroneSession(options = {}) {
+      const notifyDrone = Boolean(options.notifyDrone)
+      const stopCamera = options.stopCamera !== false
+      const clearPhoto = Boolean(options.clearPhoto)
+
+      if (notifyDrone && this.mqttConnected) {
+        await this.setCenterImageCommand('Stop').catch((e) => {
+          console.warn('No se pudo parar el centrado automático:', e)
+        })
+        await this.mqttPublish(this.mqttTopics.disconnect).catch((e) => {
+          console.warn('No se pudo enviar desconexión del dron:', e)
+        })
+      }
+
+      this.droneSessionActive = false
+      this.droneConnected = false
+      this.droneInAir = false
+      this.centerImageModeActive = false
+      this.lastCenterImageCommand = 'Stop'
+      this.lastDroneState = null
+      this.clearDroneLocation()
+
+      if (stopCamera && this.cameraActive) {
+        this.cleanupCamera()
+        this.cameraActive = false
+        this.cameraZoom = 'none'
+      }
+
+      if (clearPhoto && this.photoUrl) {
+        URL.revokeObjectURL(this.photoUrl)
+        this.photoUrl = null
+        this.photoSource = null
+      }
     },
 
     isTelemetryTopic(topic) {
@@ -996,6 +1039,7 @@ export default {
         console.warn('Mensaje telemetría inválido (no parseable):', message?.toString?.())
         return
       }
+      if (!this.droneSessionActive) return
 
       const alt = this.readTelemetryNumber(data, [
         ['alt'],
@@ -2545,12 +2589,12 @@ export default {
       try {
         // Reset real en backend/VM
         await fetch('/api/reset', { method: 'POST' }).catch(() => {})
+        await this.resetDroneSession({ notifyDrone: true, stopCamera: true, clearPhoto: true })
 
         // ✅ Reset global del live:
         this.live.reset()
         this.clearMarkers()
         this.clearAdminLocation()
-        this.clearDroneLocation()
       } catch {
         this.error = 'Error al parar el juego'
       }
@@ -2621,6 +2665,7 @@ export default {
           throw new Error('Altura de despegue inválida')
         }
         await this.mqttPublish(this.mqttTopics.takeoff, String(height))
+        this.droneSessionActive = true
         this.droneConnected = true
         this.droneInAir = true
       } catch (e) {
@@ -2643,13 +2688,10 @@ export default {
       this.connectLoading = true
       try {
         if (this.droneConnected) {
-          this.centerImageModeActive = false
-          await this.setCenterImageCommand('Stop').catch(() => {})
-          await this.mqttPublish(this.mqttTopics.disconnect)
-          this.droneConnected = false
-          this.droneInAir = false
+          await this.resetDroneSession({ notifyDrone: true, stopCamera: false })
         } else {
           await this.mqttPublish(this.mqttTopics.connect, this.buildConnectPayload())
+          this.droneSessionActive = true
           this.droneConnected = true
           this.applyGeofenceFromMqttOnDroneConnect()
         }
@@ -2756,7 +2798,7 @@ export default {
         const tempStream = await navigator.mediaDevices.getUserMedia({ video: true })
         tempStream.getTracks().forEach(t => t.stop())
       } catch (e) {
-        throw new Error('Permiso de cámara denegado')
+        throw new Error(this.getCameraAccessErrorMessage(e))
       }
 
       const devices = await navigator.mediaDevices.enumerateDevices()
@@ -2764,6 +2806,33 @@ export default {
       if (this.cameras.length && !this.selectedCameraId) {
         this.selectedCameraId = this.cameras[0].deviceId
       }
+    },
+
+    getCameraAccessErrorMessage(error) {
+      const hostname = window.location.hostname
+      const isLocalhost = ['localhost', '127.0.0.1', '::1'].includes(hostname)
+      if (!window.isSecureContext && !isLocalhost) {
+        return 'La cámara solo funciona en HTTPS o localhost. Abre la app con HTTPS o desde localhost.'
+      }
+
+      const name = error?.name || ''
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        return 'Permiso de cámara denegado. Revisa el candado del navegador y permite la cámara para esta web.'
+      }
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        return 'No se encontró ninguna cámara conectada.'
+      }
+      if (name === 'NotReadableError' || name === 'TrackStartError') {
+        return 'La cámara está ocupada por otra aplicación o el sistema no permite abrirla.'
+      }
+      if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+        return 'La cámara no admite la configuración solicitada.'
+      }
+      if (name === 'SecurityError') {
+        return 'El navegador ha bloqueado el acceso a la cámara por seguridad.'
+      }
+
+      return error?.message ? `No se pudo acceder a la cámara: ${error.message}` : 'No se pudo acceder a la cámara.'
     },
 
     async startStream() {
