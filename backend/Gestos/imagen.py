@@ -12,6 +12,8 @@ import glob
 import yaml
 
 from aiortc import (
+    RTCConfiguration,
+    RTCIceServer,
     RTCPeerConnection,
     RTCSessionDescription,
     VideoStreamTrack,
@@ -44,6 +46,8 @@ tracking_deadband_ratio = 0.04
 reference_person_width_m = 0.45
 calibration_file_env = "DRONE_CALIBRATION_YAML"
 calibration_alpha = 0.0
+webrtc_use_stun = os.environ.get("WEBRTC_USE_STUN", "0").strip().lower() in {"1", "true", "yes", "on"}
+webrtc_stun_url = os.environ.get("WEBRTC_STUN_URL", "stun:stun.l.google.com:19302").strip()
 
 
 async def run_in_worker_thread(func, *args, **kwargs):
@@ -416,7 +420,6 @@ class ProcessedVideoTrack(VideoStreamTrack):
 
         img = frame.to_ndarray(format="bgr24")
         img = undistort_frame(img)
-        img = cv2.flip(img, 1)
         frame_height, frame_width = img.shape[:2]
 
         now = time.time()
@@ -482,7 +485,11 @@ async def offer(request):
         type=params["type"]
     )
 
-    pc = RTCPeerConnection()
+    rtc_configuration = RTCConfiguration()
+    if webrtc_use_stun and webrtc_stun_url:
+        rtc_configuration.iceServers = [RTCIceServer(urls=webrtc_stun_url)]
+
+    pc = RTCPeerConnection(rtc_configuration)
 
     pcs.add(pc)
 
@@ -494,6 +501,11 @@ async def offer(request):
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
+
+    for _ in range(30):
+        if pc.iceGatheringState == "complete":
+            break
+        await asyncio.sleep(0.1)
 
     return web.json_response({
         "sdp": pc.localDescription.sdp,
@@ -552,4 +564,8 @@ for route in list(app.router.routes()):
     cors.add(route)
 
 if __name__ == "__main__":
+    if webrtc_use_stun and webrtc_stun_url:
+        print(f"✅ WebRTC con STUN activado: {webrtc_stun_url}")
+    else:
+        print("ℹ️ WebRTC sin STUN. En Docker remoto puede fallar la negociacion ICE.")
     web.run_app(app, host="0.0.0.0", port=8080)

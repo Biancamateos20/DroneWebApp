@@ -17,6 +17,8 @@ services:
     image: node:18
     working_dir: /workspace/frontend/mi-app
     command: npm run serve -- --host 0.0.0.0 --port 5173
+    environment:
+      - VUE_APP_WEBRTC_USE_STUN=true
     ports:
       - "5173:5173"
     volumes:
@@ -29,6 +31,9 @@ services:
       dockerfile: .devcontainer/Dockerfile
     working_dir: /workspace/backend/Gestos
     command: python imagen.py
+    environment:
+      - WEBRTC_USE_STUN=true
+      - WEBRTC_STUN_URL=stun:stun.l.google.com:19302
     ports:
       - "8080:8080"
     volumes:

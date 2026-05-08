@@ -192,6 +192,12 @@
               El mapa marca en vivo la parada prevista antes del geofence para el admin y el jugador seleccionado.
             </p>
             <p class="mini-note">{{ gotoStatus }}</p>
+            <p v-if="activePlayerAlias" class="mini-note">
+              Turno actual: {{ activePlayerAlias }}
+            </p>
+            <p v-if="nextPlayerAlias" class="mini-note">
+              Siguiente color elegido: {{ nextPlayerAlias }}
+            </p>
 
             <div class="panel-actions lab-actions">
               <button
@@ -473,6 +479,13 @@ export default {
       playersByAlias: {},
       playerAnimations: {},
       selectedPlayerAlias: null,
+      activePlayerAlias: null,
+      nextPlayerAlias: null,
+      photoTakenAlias: null,
+      pendingVoiceTargetAlias: null,
+      pendingVoiceCommandId: 0,
+      lastProcessedVoiceCommandId: 0,
+      voiceGotoLoading: false,
       geofenceStopDistance: 5,
       gotoPlayerLoading: false,
       gotoPlayerError: null
@@ -639,6 +652,25 @@ export default {
         this.refreshAllStopPreviews()
       },
       deep: true
+    },
+    droneInAir(nextValue, prevValue) {
+      if (nextValue === prevValue) return
+      if (nextValue) {
+        this.updateSharedGameState({ dron_despegado: true })
+        return
+      }
+      this.activePlayerAlias = null
+      this.nextPlayerAlias = null
+      this.photoTakenAlias = null
+      this.pendingVoiceTargetAlias = null
+      this.selectedPlayerAlias = null
+      this.updateSharedGameState({
+        dron_despegado: false,
+        jugador_actual_alias: null,
+        siguiente_jugador_alias: null,
+        foto_tomada_alias: null,
+        voz_objetivo_alias: null
+      })
     },
     adminPos: {
       handler() {
@@ -1248,6 +1280,10 @@ export default {
 
       this.live.onMessage = (msg) => {
         if (!msg) return
+
+        if (msg.type === 'game_state') {
+          this.applySharedGameState(msg)
+        }
 
         if (msg.type === 'snapshot' && Array.isArray(msg.players)) {
           this.applyPlayersSnapshot(msg.players)
@@ -2516,7 +2552,8 @@ export default {
     startPollingFallback() {
       this.stopPollingFallback()
       this.pollTimer = setInterval(async () => {
-        // si el WS está activo, no hace falta poll
+        await this.refreshSharedGameState()
+
         if (this.live?.enabled && this.wsReady) return
         try {
           const url = this.getPlayersUrl()
@@ -2552,7 +2589,7 @@ export default {
     },
 
     getPlayersUrl() {
-      if (!this.live?.enabled) return '/api/jugadores'
+      if (!this.live?.enabled || !this.wsReady) return '/api/jugadores'
       let base = (process.env.VUE_APP_LIVE_URL || '').trim().replace(/\/$/, '')
       // Evitar mixed-content o localhost en producción
       try {
@@ -2568,6 +2605,73 @@ export default {
       }
       if (base) return `${base}/jugadores`
       return '/api/jugadores'
+    },
+
+    async refreshSharedGameState() {
+      try {
+        const res = await fetch('/api/estado-juego')
+        if (!res.ok) return
+        const data = await res.json()
+        this.applySharedGameState(data)
+      } catch (e) {
+        console.warn('Error polling estado-juego:', e)
+      }
+    },
+
+    applySharedGameState(data) {
+      if (!data || typeof data !== 'object') return
+
+      if (typeof data.dron_despegado === 'boolean') {
+        this.droneInAir = data.dron_despegado
+      }
+
+      if ('jugador_actual_alias' in data) {
+        this.activePlayerAlias = data.jugador_actual_alias == null
+          ? null
+          : (String(data.jugador_actual_alias).trim().toUpperCase() || null)
+      }
+
+      if ('siguiente_jugador_alias' in data) {
+        this.nextPlayerAlias = data.siguiente_jugador_alias == null
+          ? null
+          : (String(data.siguiente_jugador_alias).trim().toUpperCase() || null)
+      }
+
+      if ('foto_tomada_alias' in data) {
+        this.photoTakenAlias = data.foto_tomada_alias == null
+          ? null
+          : (String(data.foto_tomada_alias).trim().toUpperCase() || null)
+      }
+
+      if ('voz_objetivo_alias' in data) {
+        this.pendingVoiceTargetAlias = data.voz_objetivo_alias == null
+          ? null
+          : (String(data.voz_objetivo_alias).trim().toUpperCase() || null)
+      }
+
+      if ('voz_comando_id' in data) {
+        this.pendingVoiceCommandId = Number(data.voz_comando_id || 0)
+      }
+
+      if (this.nextPlayerAlias) {
+        this.selectedPlayerAlias = this.nextPlayerAlias
+      } else if (!this.droneInAir && !this.activePlayerAlias) {
+        this.selectedPlayerAlias = null
+      }
+
+      this.maybeProcessVoiceGoto()
+    },
+
+    async updateSharedGameState(payload) {
+      try {
+        await fetch('/api/estado-juego', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
+      } catch (e) {
+        console.warn('Error actualizando estado juego:', e)
+      }
     },
 
     async iniciarJuego() {
@@ -2627,6 +2731,12 @@ export default {
           if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
           this.photoUrl = URL.createObjectURL(blob)
           this.photoSource = 'RTC'
+          if (this.activePlayerAlias) {
+            this.photoTakenAlias = this.activePlayerAlias
+            await this.updateSharedGameState({
+              foto_tomada_alias: this.activePlayerAlias
+            })
+          }
         } else {
           throw new Error('Activa la cámara para capturar la imagen procesada')
         }
@@ -2877,7 +2987,7 @@ export default {
 
         const offer = await this.pc.createOffer()
         await this.pc.setLocalDescription(offer)
-        await this.waitForIceGathering(this.pc, 250)
+        await this.waitForIceGathering(this.pc, 3000)
 
         const offerUrl = this.getWebRtcUrl('/offer')
 
@@ -2988,10 +3098,11 @@ export default {
         : { iceServers: [] }
     },
 
-    waitForIceGathering(pc, timeoutMs = 250) {
+    waitForIceGathering(pc, timeoutMs = 3000) {
       return new Promise(resolve => {
         if (pc.iceGatheringState === 'complete') return resolve()
         const timer = window.setTimeout(() => {
+          console.warn('ICE gathering no se completó a tiempo; se envía la oferta con los candidatos disponibles.')
           cleanup()
           resolve()
         }, timeoutMs)
@@ -3017,6 +3128,16 @@ export default {
       this.gotoLoading = true
       try {
         await this.publishGoto(this.adminPos.lat, this.adminPos.lon)
+        this.activePlayerAlias = null
+        this.nextPlayerAlias = null
+        this.photoTakenAlias = null
+        this.pendingVoiceTargetAlias = null
+        await this.updateSharedGameState({
+          jugador_actual_alias: null,
+          siguiente_jugador_alias: null,
+          foto_tomada_alias: null,
+          voz_objetivo_alias: null
+        })
       } catch (e) {
         this.gotoError = e.message || 'Error enviando GOTO'
       } finally {
@@ -3077,10 +3198,54 @@ export default {
       this.gotoPlayerLoading = true
       try {
         await this.publishGoto(this.selectedPlayer.lat, this.selectedPlayer.lon)
+        this.activePlayerAlias = this.selectedPlayer.alias
+        this.nextPlayerAlias = null
+        this.photoTakenAlias = null
+        this.pendingVoiceTargetAlias = null
+        await this.updateSharedGameState({
+          jugador_actual_alias: this.selectedPlayer.alias,
+          siguiente_jugador_alias: null,
+          foto_tomada_alias: null,
+          voz_objetivo_alias: null
+        })
       } catch (e) {
         this.gotoPlayerError = e.message || 'Error enviando GOTO al jugador'
       } finally {
         this.gotoPlayerLoading = false
+      }
+    },
+
+    async maybeProcessVoiceGoto() {
+      if (this.voiceGotoLoading) return
+      if (!this.pendingVoiceTargetAlias) return
+      if (!this.pendingVoiceCommandId) return
+      if (this.pendingVoiceCommandId <= this.lastProcessedVoiceCommandId) return
+      if (!this.droneConnected || !this.droneInAir) return
+
+      const target = this.playersByAlias[this.pendingVoiceTargetAlias] || null
+      if (!target) return
+      if (!Number.isFinite(Number(target.lat)) || !Number.isFinite(Number(target.lon))) return
+
+      this.voiceGotoLoading = true
+      this.lastProcessedVoiceCommandId = this.pendingVoiceCommandId
+
+      try {
+        await this.publishGoto(target.lat, target.lon)
+        this.activePlayerAlias = target.alias
+        this.nextPlayerAlias = null
+        this.photoTakenAlias = null
+        this.pendingVoiceTargetAlias = null
+        this.selectedPlayerAlias = target.alias
+        await this.updateSharedGameState({
+          jugador_actual_alias: target.alias,
+          siguiente_jugador_alias: null,
+          foto_tomada_alias: null,
+          voz_objetivo_alias: null
+        })
+      } catch (e) {
+        this.gotoPlayerError = e.message || 'Error enviando GOTO por voz'
+      } finally {
+        this.voiceGotoLoading = false
       }
     }
   }

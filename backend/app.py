@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, Response
 import requests
 from flask_cors import CORS
 import os
+from Voz.voz import get_color_name_from_alias, resolve_spoken_color
 
 #https://github.com/dronsEETAC/WebAppFlask/blob/main/WebAppHTTP/app/dron_controls.py
 
@@ -17,11 +18,17 @@ IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "http://127.0.0.1:8080")
 
 colores_ocupados = set()
 juego_en_curso = False
+dron_despegado = False
 
 jugadores = []
 game_start_id = 0
 reset_id = 0
 player_alias_by_id = {}
+jugador_actual_alias = None
+siguiente_jugador_alias = None
+foto_tomada_alias = None
+voz_objetivo_alias = None
+voz_comando_id = 0
 
 
 @app.route("/Hello", methods=['GET'])
@@ -39,9 +46,16 @@ def registrar_jugador():
     lon = data.get("lon")
     alias = data.get("alias")
     raw_player_id = data.get("playerId", data.get("player_id"))
+    raw_reset_id = data.get("resetId", data.get("reset_id"))
     player_id = None
+    client_reset_id = None
     if raw_player_id is not None:
         player_id = str(raw_player_id).strip() or None
+    if raw_reset_id is not None:
+        try:
+            client_reset_id = int(raw_reset_id)
+        except Exception:
+            client_reset_id = None
 
     if lat is None or lon is None or alias is None:
         return jsonify({"error": "Datos incompletos"}), 400
@@ -49,6 +63,9 @@ def registrar_jugador():
     alias = str(alias).strip()
     if not alias:
         return jsonify({"error": "Alias inválido"}), 400
+
+    if client_reset_id is not None and client_reset_id != reset_id:
+        return jsonify({"error": "Sesion antigua ignorada", "stale_reset": True}), 409
 
     if player_id:
         prev_alias = player_alias_by_id.get(player_id)
@@ -125,9 +142,19 @@ def ubicacion_live():
     alias = data.get("alias")
     precision = data.get("precision")
     ts = data.get("ts")
+    raw_reset_id = data.get("resetId", data.get("reset_id"))
+    client_reset_id = None
+    if raw_reset_id is not None:
+        try:
+            client_reset_id = int(raw_reset_id)
+        except Exception:
+            client_reset_id = None
 
     if lat is None or lon is None or alias is None:
         return jsonify({"error": "Datos incompletos"}), 400
+
+    if client_reset_id is not None and client_reset_id != reset_id:
+        return jsonify({"error": "Sesion antigua ignorada", "stale_reset": True}), 409
 
     if alias not in colores_ocupados:
         colores_ocupados.add(alias)
@@ -193,6 +220,9 @@ def iniciar_juego():
         return jsonify({
             "status": "ok",
             "juego_en_curso": juego_en_curso,
+            "dron_despegado": dron_despegado,
+            "jugador_actual_alias": jugador_actual_alias,
+            "siguiente_jugador_alias": siguiente_jugador_alias,
             "game_start_id": game_start_id,
             "forwarded_vm": False
         }), 200
@@ -204,12 +234,19 @@ def iniciar_juego():
 @app.route("/reset", methods=["POST"])
 def reset():
     # Reinicia el estado local y solicita reset en la VM.
-    global juego_en_curso, colores_ocupados, jugadores, reset_id, player_alias_by_id
+    global juego_en_curso, dron_despegado, colores_ocupados, jugadores, reset_id, player_alias_by_id
+    global jugador_actual_alias, siguiente_jugador_alias, foto_tomada_alias, voz_objetivo_alias, voz_comando_id
 
     colores_ocupados.clear()
     jugadores.clear()
     player_alias_by_id.clear()
     juego_en_curso = False
+    dron_despegado = False
+    jugador_actual_alias = None
+    siguiente_jugador_alias = None
+    foto_tomada_alias = None
+    voz_objetivo_alias = None
+    voz_comando_id = 0
     reset_id += 1
     print("Juego reseteado (proxy)")
 
@@ -219,7 +256,17 @@ def reset():
         except Exception as e:
             print("⚠️ No se pudo resetear VM (continuo igual):", e)
 
-    return jsonify({"status": "reset ok", "reset_id": reset_id}), 200
+    return jsonify({
+        "status": "reset ok",
+        "reset_id": reset_id,
+        "juego_en_curso": juego_en_curso,
+        "dron_despegado": dron_despegado,
+        "jugador_actual_alias": jugador_actual_alias,
+        "siguiente_jugador_alias": siguiente_jugador_alias,
+        "foto_tomada_alias": foto_tomada_alias,
+        "voz_objetivo_alias": voz_objetivo_alias,
+        "voz_comando_id": voz_comando_id
+    }), 200
 
 
 def _fetch_image_from_rtc(timeout_s: int = 12):
@@ -337,13 +384,111 @@ def webrtc_snapshot():
     return _proxy_webrtc_request("/snapshot")
 
 
-@app.route("/estado-juego", methods=["GET"])
+@app.route("/estado-juego", methods=["GET", "POST"])
 def estado_juego():
+    global juego_en_curso, dron_despegado, jugador_actual_alias, siguiente_jugador_alias
+    global foto_tomada_alias, voz_objetivo_alias, voz_comando_id
+
+    if request.method == "POST":
+        data = request.get_json() or {}
+
+        if "juego_en_curso" in data:
+            juego_en_curso = bool(data.get("juego_en_curso"))
+
+        if "dron_despegado" in data:
+            dron_despegado = bool(data.get("dron_despegado"))
+
+        if "jugador_actual_alias" in data:
+            value = data.get("jugador_actual_alias")
+            if value is None:
+                jugador_actual_alias = None
+            else:
+                alias = str(value).strip().upper()
+                jugador_actual_alias = alias or None
+
+        if "siguiente_jugador_alias" in data:
+            value = data.get("siguiente_jugador_alias")
+            if value is None:
+                siguiente_jugador_alias = None
+            else:
+                alias = str(value).strip().upper()
+                siguiente_jugador_alias = alias or None
+
+        if "foto_tomada_alias" in data:
+            value = data.get("foto_tomada_alias")
+            if value is None:
+                foto_tomada_alias = None
+            else:
+                alias = str(value).strip().upper()
+                foto_tomada_alias = alias or None
+
+        if "voz_objetivo_alias" in data:
+            value = data.get("voz_objetivo_alias")
+            if value is None:
+                voz_objetivo_alias = None
+            else:
+                alias = str(value).strip().upper()
+                voz_objetivo_alias = alias or None
+
+        if "voz_comando_id" in data:
+            voz_comando_id = int(data.get("voz_comando_id") or 0)
+
     # Devuelve el estado actual del juego y contadores.
     return jsonify({
         "juego_en_curso": juego_en_curso,
+        "dron_despegado": dron_despegado,
+        "jugador_actual_alias": jugador_actual_alias,
+        "siguiente_jugador_alias": siguiente_jugador_alias,
+        "foto_tomada_alias": foto_tomada_alias,
+        "voz_objetivo_alias": voz_objetivo_alias,
+        "voz_comando_id": voz_comando_id,
         "reset_id": reset_id,
         "game_start_id": game_start_id
+    }), 200
+
+
+@app.route("/voz-color", methods=["POST"])
+def voz_color():
+    global siguiente_jugador_alias, foto_tomada_alias, voz_objetivo_alias, voz_comando_id
+
+    data = request.get_json() or {}
+    texto = str(data.get("texto") or "").strip()
+    current_alias = str(data.get("current_alias") or "").strip().upper()
+
+    if not texto:
+        return jsonify({"ok": False, "error": "Falta texto reconocido"}), 400
+
+    if not current_alias:
+        return jsonify({"ok": False, "error": "Falta alias actual"}), 400
+
+    if jugador_actual_alias != current_alias:
+        return jsonify({"ok": False, "error": "Ahora mismo no te toca enviar el dron"}), 409
+
+    if foto_tomada_alias != current_alias:
+        return jsonify({"ok": False, "error": "Primero hay que hacer la foto del jugador actual"}), 409
+
+    aliases_disponibles = []
+    for jugador in jugadores:
+        alias = str(jugador.get("alias") or "").strip().upper()
+        if alias and alias != current_alias:
+            aliases_disponibles.append(alias)
+
+    aliases_disponibles = list(dict.fromkeys(aliases_disponibles))
+    alias_resuelto = resolve_spoken_color(texto, aliases_disponibles)
+
+    if alias_resuelto is None:
+        return jsonify({"ok": False, "error": "No se ha reconocido un color registrado"}), 404
+
+    siguiente_jugador_alias = alias_resuelto
+    voz_objetivo_alias = alias_resuelto
+    voz_comando_id += 1
+
+    return jsonify({
+        "ok": True,
+        "texto": texto,
+        "alias": alias_resuelto,
+        "color_name": get_color_name_from_alias(alias_resuelto),
+        "voz_comando_id": voz_comando_id
     }), 200
 
 @app.route("/connection", methods=["POST"])
