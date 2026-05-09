@@ -6,7 +6,17 @@ const corsHeaders = {
 
 function getGameState() {
   if (!globalThis.__gameState) {
-    globalThis.__gameState = { juego_en_curso: false, reset_id: 0, game_start_id: 0 };
+    globalThis.__gameState = {
+      juego_en_curso: false,
+      dron_despegado: false,
+      jugador_actual_alias: null,
+      siguiente_jugador_alias: null,
+      foto_tomada_alias: null,
+      voz_objetivo_alias: null,
+      voz_comando_id: 0,
+      reset_id: 0,
+      game_start_id: 0
+    };
   }
   return globalThis.__gameState;
 }
@@ -29,6 +39,12 @@ export async function onRequest(context) {
   return new Response(JSON.stringify({
     ok: true,
     juego_en_curso: game.juego_en_curso,
+    dron_despegado: !!game.dron_despegado,
+    jugador_actual_alias: game.jugador_actual_alias || null,
+    siguiente_jugador_alias: game.siguiente_jugador_alias || null,
+    foto_tomada_alias: game.foto_tomada_alias || null,
+    voz_objetivo_alias: game.voz_objetivo_alias || null,
+    voz_comando_id: Number(game.voz_comando_id || 0),
     game_start_id: game.game_start_id,
     reset_id: Number(game.reset_id || 0),
   }), {

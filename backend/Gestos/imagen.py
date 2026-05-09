@@ -201,6 +201,232 @@ def undistort_frame(img):
     map_x, map_y = maps
     return cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
+
+class BrowserFrameProcessor:
+
+    def __init__(self):
+        self.detection_interval = 0.8
+        self.last_detection_enqueue = 0.0
+        self.last_boxes = []
+        self.smoothed_offset_ratio = 0.0
+        self.primary_box = None
+
+    @staticmethod
+    def _box_area(box):
+        return max(1, (box[2] - box[0])) * max(1, (box[3] - box[1]))
+
+    @staticmethod
+    def _box_center(box):
+        return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+
+    @staticmethod
+    def _box_iou(box_a, box_b):
+        x_left = max(box_a[0], box_b[0])
+        y_top = max(box_a[1], box_b[1])
+        x_right = min(box_a[2], box_b[2])
+        y_bottom = min(box_a[3], box_b[3])
+
+        inter_width = max(0.0, x_right - x_left)
+        inter_height = max(0.0, y_bottom - y_top)
+        intersection = inter_width * inter_height
+        if intersection <= 0.0:
+            return 0.0
+
+        area_a = BrowserFrameProcessor._box_area(box_a)
+        area_b = BrowserFrameProcessor._box_area(box_b)
+        union = max(1.0, float(area_a + area_b - intersection))
+        return float(intersection / union)
+
+    def _extract_boxes(self, img):
+        frame_height, frame_width = img.shape[:2]
+        resize_scale = min(1.0, 384 / max(frame_width, frame_height))
+        if resize_scale < 1.0:
+            resized = cv2.resize(
+                img,
+                (max(1, int(frame_width * resize_scale)), max(1, int(frame_height * resize_scale))),
+                interpolation=cv2.INTER_LINEAR
+            )
+        else:
+            resized = img
+
+        results = model.predict(
+            resized,
+            imgsz=320,
+            conf=0.25,
+            classes=[0],
+            verbose=False
+        )
+
+        boxes = []
+        if not results:
+            return boxes
+
+        raw_boxes = results[0].boxes
+        if raw_boxes is None:
+            return boxes
+
+        for box in raw_boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            if resize_scale < 1.0:
+                x1 /= resize_scale
+                y1 /= resize_scale
+                x2 /= resize_scale
+                y2 /= resize_scale
+            conf = float(box.conf[0]) if box.conf is not None else 0.0
+            boxes.append((int(x1), int(y1), int(x2), int(y2), conf))
+        return boxes
+
+    def _select_primary_box(self):
+        if not self.last_boxes:
+            self.primary_box = None
+            return None
+
+        largest_box = max(self.last_boxes, key=self._box_area)
+        largest_area = float(self._box_area(largest_box))
+
+        if self.primary_box is None:
+            self.primary_box = largest_box
+            return largest_box
+
+        prev_box = self.primary_box
+        prev_center_x, prev_center_y = self._box_center(prev_box)
+        prev_span = max(1.0, float(max(prev_box[2] - prev_box[0], prev_box[3] - prev_box[1])))
+
+        continuation_box = None
+        continuation_score = -1.0
+
+        for candidate in self.last_boxes:
+            candidate_area = float(self._box_area(candidate))
+            candidate_center_x, candidate_center_y = self._box_center(candidate)
+            center_distance = math.hypot(candidate_center_x - prev_center_x, candidate_center_y - prev_center_y)
+            center_ratio = center_distance / prev_span
+            iou = self._box_iou(prev_box, candidate)
+
+            if iou < 0.1 and center_ratio > 0.7:
+                continue
+
+            score = (iou * 0.65) + (max(0.0, 1.0 - min(center_ratio, 1.5)) * 0.2) + ((candidate_area / largest_area) * 0.15)
+            if score > continuation_score:
+                continuation_score = score
+                continuation_box = candidate
+
+        if continuation_box is not None:
+            continuation_area = float(self._box_area(continuation_box))
+            if continuation_area >= (largest_area * 0.72):
+                self.primary_box = continuation_box
+                return continuation_box
+
+        self.primary_box = largest_box
+        return largest_box
+
+    def _build_tracking_payload(self, frame_width, frame_height):
+        target = self._select_primary_box()
+        now = time.time()
+
+        if not target:
+            self.smoothed_offset_ratio *= 0.65
+            return {
+                "ok": True,
+                "status": "no-target",
+                "direction": "center",
+                "offsetPx": 0,
+                "offsetRatio": 0.0,
+                "offsetPercent": 0.0,
+                "recommendedMoveM": 0.0,
+                "estimatedDistanceM": 0.0,
+                "frameWidth": int(frame_width),
+                "frameHeight": int(frame_height),
+                "targetBox": None,
+                "timestamp": now
+            }
+
+        x1, y1, x2, y2, conf = target
+        target_center_x = (x1 + x2) / 2
+        frame_center_x = frame_width / 2
+        raw_offset_px = target_center_x - frame_center_x
+        raw_offset_ratio = raw_offset_px / max(1.0, frame_width / 2)
+        self.smoothed_offset_ratio = (
+            (self.smoothed_offset_ratio * 0.6) + (raw_offset_ratio * 0.4)
+        )
+
+        if abs(self.smoothed_offset_ratio) <= tracking_deadband_ratio:
+            direction = "center"
+        else:
+            direction = "left" if self.smoothed_offset_ratio > 0 else "right"
+
+        box_width_px = max(1, x2 - x1)
+        half_fov_rad = math.radians(camera_horizontal_fov_deg / 2)
+        focal_length_px = frame_width / (2 * math.tan(half_fov_rad))
+        estimated_distance_m = (reference_person_width_m * focal_length_px) / box_width_px
+        angle_offset_rad = self.smoothed_offset_ratio * half_fov_rad
+        recommended_move_m = abs(estimated_distance_m * math.tan(angle_offset_rad))
+
+        return {
+            "ok": True,
+            "status": "tracking",
+            "direction": direction,
+            "offsetPx": int(round(raw_offset_px)),
+            "offsetRatio": round(float(self.smoothed_offset_ratio), 4),
+            "offsetPercent": round(abs(float(self.smoothed_offset_ratio)) * 100, 1),
+            "recommendedMoveM": round(float(recommended_move_m), 2),
+            "estimatedDistanceM": round(float(estimated_distance_m), 2),
+            "frameWidth": int(frame_width),
+            "frameHeight": int(frame_height),
+            "targetBox": {
+                "x1": int(x1),
+                "y1": int(y1),
+                "x2": int(x2),
+                "y2": int(y2),
+                "confidence": round(float(conf), 3)
+            },
+            "timestamp": now
+        }
+
+    async def process_frame(self, img):
+        img = undistort_frame(img)
+        frame_height, frame_width = img.shape[:2]
+
+        now = time.time()
+        if (now - self.last_detection_enqueue) >= self.detection_interval:
+            try:
+                boxes = await run_in_worker_thread(self._extract_boxes, img.copy())
+                if boxes is not None:
+                    self.last_boxes = boxes
+                self.last_detection_enqueue = now
+            except Exception as e:
+                print("⚠️ Error procesando frame:", e)
+
+        if self.last_boxes:
+            for x1, y1, x2, y2, conf in self.last_boxes:
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    img,
+                    f"person {conf:.2f}",
+                    (x1, max(0, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
+                )
+
+        tracking_payload = self._build_tracking_payload(frame_width, frame_height)
+
+        cv2.putText(
+            img,
+            "Person Detection (COCO)",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
+
+        return img, tracking_payload
+
+
+browser_frame_processor = BrowserFrameProcessor()
+
+
 class ProcessedVideoTrack(VideoStreamTrack):
 
     def __init__(self, source):
@@ -512,6 +738,31 @@ async def offer(request):
         "type": pc.localDescription.type
     })
 
+
+async def frame_upload(request):
+    raw = await request.read()
+    if not raw:
+        return web.json_response({"error": "No se recibieron bytes de imagen"}, status=400)
+
+    img_array = np.frombuffer(raw, dtype=np.uint8)
+    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    if img is None:
+        return web.json_response({"error": "No se pudo decodificar la imagen JPEG"}, status=400)
+
+    processed_img, tracking_payload = await browser_frame_processor.process_frame(img)
+    ok, buf = cv2.imencode(".jpg", processed_img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if not ok:
+        return web.json_response({"error": "No se pudo codificar la imagen procesada"}, status=500)
+
+    global latest_jpeg, latest_ts
+    async with latest_lock:
+        latest_jpeg = buf.tobytes()
+        latest_ts = time.time()
+
+    update_latest_tracking(tracking_payload)
+    return web.json_response({"ok": True})
+
+
 async def snapshot(request):
     # Devuelve el ultimo frame JPEG disponible.
     async with latest_lock:
@@ -548,6 +799,7 @@ async def cleanup(app):
 
 app = web.Application()
 app.router.add_post("/offer", offer)
+app.router.add_post("/frame", frame_upload)
 app.router.add_get("/snapshot", snapshot)
 app.router.add_get("/tracking", tracking)
 app.on_shutdown.append(cleanup)

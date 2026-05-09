@@ -374,6 +374,11 @@ def webrtc_offer():
     return _proxy_webrtc_request("/offer")
 
 
+@app.route("/webrtc/frame", methods=["POST"])
+def webrtc_frame():
+    return _proxy_webrtc_request("/frame")
+
+
 @app.route("/webrtc/tracking", methods=["GET"])
 def webrtc_tracking():
     return _proxy_webrtc_request("/tracking")

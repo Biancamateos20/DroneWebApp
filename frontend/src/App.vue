@@ -13,7 +13,15 @@
 
     <IniciarJuego v-else-if="screen === 'admin'" />
 
-    <WebRTC v-else-if="screen === 'webrtc'" />
+    <WebRTC
+      v-else-if="screen === 'webrtc'"
+      :user-alias="userAlias"
+      :drone-in-air="droneInAir"
+      :active-player-alias="activePlayerAlias"
+      :selected-next-player-alias="selectedNextPlayerAlias"
+      :photo-taken-alias="photoTakenAlias"
+      @pick-next-player="handleNextPlayerSelected"
+    />
   </div>
 </template>
 
@@ -45,6 +53,11 @@ export default {
       lastHttpLiveSentAt: 0,
       httpLiveSending: false,
 
+      droneInAir: false,
+      activePlayerAlias: null,
+      selectedNextPlayerAlias: null,
+      photoTakenAlias: null,
+
       lastStartId: null,
       lastResetId: null
     }
@@ -59,6 +72,10 @@ export default {
       // Reset global => volver a login y parar tracking
       if (msg.type === 'reset') {
         this.handleReset()
+      }
+
+      if (msg.type === 'game_state') {
+        this.applyGameState(msg)
       }
 
       // Estado juego => si admin inicia, pasamos a webrtc desde sala espera
@@ -89,15 +106,15 @@ export default {
   },
 
   methods: {
-    handleLoginSuccess(data) {
+    async handleLoginSuccess(data) {
       this.userAlias = data.color
       this.screen = 'waiting'
 
+      // 🔒 Evitar auto-start en refresh: tomar el estado actual como "visto"
+      await this.syncGameStateOnJoin()
+
       // Registrar jugador por HTTP (necesario si no hay WS)
       this.registerPlayerHttp()
-
-      // 🔒 Evitar auto-start en refresh: tomar el estado actual como "visto"
-      this.syncGameStateOnJoin()
 
       // WS player
       this.live.setAlias(this.userAlias)
@@ -174,8 +191,6 @@ export default {
       this.stopGamePolling()
       this.gamePollTimer = setInterval(async () => {
         if (this.screen !== 'waiting' && this.screen !== 'webrtc') return
-        const canUseWs = this.live?.enabled && this.live?.isOpen
-        if (this.screen === 'webrtc' && canUseWs) return
         try {
           const res = await fetch('/api/estado-juego')
           if (!res.ok) return
@@ -186,6 +201,7 @@ export default {
             this.handleReset()
             return
           }
+          this.applyGameState(data)
           if (this.screen === 'waiting' && data?.juego_en_curso === true) {
             const startId = Number(data.game_start_id ?? 0)
             if (this.shouldStartWithId(startId)) {
@@ -332,6 +348,7 @@ export default {
                 playerId,
                 lat,
                 lon,
+                resetId: this.getLastResetSeen() || 0,
                 ts: Date.now()
               })
             })
@@ -367,6 +384,7 @@ export default {
         body: JSON.stringify({
           alias: this.userAlias,
           playerId,
+          resetId: this.getLastResetSeen() || 0,
           lat: targetLat,
           lon: targetLon,
           precision,
@@ -394,8 +412,61 @@ export default {
         if (resetId) {
           this.markResetSeen(resetId)
         }
+        this.applyGameState(data)
       } catch (e) {
         console.warn('Error sincronizando estado juego:', e)
+      }
+    },
+
+    applyGameState(data) {
+      if (!data || typeof data !== 'object') return
+
+      if (typeof data.dron_despegado === 'boolean') {
+        this.droneInAir = data.dron_despegado
+      }
+
+      if ('jugador_actual_alias' in data) {
+        const alias = data.jugador_actual_alias == null
+          ? null
+          : (String(data.jugador_actual_alias).trim().toUpperCase() || null)
+        this.activePlayerAlias = alias
+      }
+
+      if ('siguiente_jugador_alias' in data) {
+        const alias = data.siguiente_jugador_alias == null
+          ? null
+          : (String(data.siguiente_jugador_alias).trim().toUpperCase() || null)
+        this.selectedNextPlayerAlias = alias
+      }
+
+      if ('foto_tomada_alias' in data) {
+        const alias = data.foto_tomada_alias == null
+          ? null
+          : (String(data.foto_tomada_alias).trim().toUpperCase() || null)
+        this.photoTakenAlias = alias
+      }
+
+      if (this.screen === 'waiting' && this.droneInAir) {
+        this.screen = 'webrtc'
+      }
+    },
+
+    async handleNextPlayerSelected(alias) {
+      const nextAlias = alias == null ? null : (String(alias).trim().toUpperCase() || null)
+      if (!nextAlias) return
+
+      this.selectedNextPlayerAlias = nextAlias
+
+      try {
+        await fetch('/api/estado-juego', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            siguiente_jugador_alias: nextAlias
+          })
+        })
+      } catch (e) {
+        console.warn('Error guardando siguiente jugador:', e)
       }
     },
 
@@ -442,8 +513,13 @@ export default {
     handleReset() {
       this.stopLiveLocation()
       this.stopGamePolling()
+      this.live?.disconnect()
       this.screen = 'login'
       this.userAlias = null
+      this.droneInAir = false
+      this.activePlayerAlias = null
+      this.selectedNextPlayerAlias = null
+      this.photoTakenAlias = null
       this.lastSentAt = 0
       this.lastSentCoords = null
       this.lastHttpLiveSentAt = 0
@@ -459,8 +535,19 @@ export default {
 </script>
 
 <style>
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background-color: black;
+  overflow-x: hidden;
+}
+
 #app {
   background-color: black;
   min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
 }
 </style>

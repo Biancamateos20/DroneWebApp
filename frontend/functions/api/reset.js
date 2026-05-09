@@ -11,7 +11,17 @@ function getStore() {
 
 function getGameState() {
   if (!globalThis.__gameState) {
-    globalThis.__gameState = { juego_en_curso: false, reset_id: 0, game_start_id: 0 };
+    globalThis.__gameState = {
+      juego_en_curso: false,
+      dron_despegado: false,
+      jugador_actual_alias: null,
+      siguiente_jugador_alias: null,
+      foto_tomada_alias: null,
+      voz_objetivo_alias: null,
+      voz_comando_id: 0,
+      reset_id: 0,
+      game_start_id: 0
+    };
   }
   return globalThis.__gameState;
 }
@@ -35,6 +45,12 @@ export async function onRequest(context) {
 
   const game = getGameState();
   game.juego_en_curso = false;
+  game.dron_despegado = false;
+  game.jugador_actual_alias = null;
+  game.siguiente_jugador_alias = null;
+  game.foto_tomada_alias = null;
+  game.voz_objetivo_alias = null;
+  game.voz_comando_id = 0;
   game.reset_id = Number(game.reset_id || 0) + 1;
 
   if (globalThis.__droneState) {

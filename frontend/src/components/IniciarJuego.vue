@@ -318,7 +318,7 @@
           <div class="camera-card remote">
             <div class="camera-title">Procesado</div>
             <div class="camera-viewport">
-              <video ref="remoteVideo" class="camera-video" autoplay playsinline muted></video>
+              <img v-if="remoteFrameUrl" :src="remoteFrameUrl" class="camera-video" alt="Video procesado" />
               <div
                 v-if="cameraGuidanceVisible"
                 class="camera-guide"
@@ -447,8 +447,13 @@ export default {
       cameras: [],
       selectedCameraId: null,
       cameraZoom: 'none',
-      pc: null,
       localStream: null,
+      remoteFrameUrl: null,
+      cameraCanvas: null,
+      cameraUploadTimer: null,
+      cameraUploadPending: false,
+      cameraSnapshotTimer: null,
+      cameraSnapshotPending: false,
       cameraTracking: null,
       cameraTrackingTimer: null,
       cameraTrackingPending: false,
@@ -2711,34 +2716,28 @@ export default {
         this.centerImageModeActive = false
         await this.setCenterImageCommand('Stop').catch(() => {})
 
-        const remoteVideo = this.$refs.remoteVideo
-        if (this.cameraActive && remoteVideo && remoteVideo.videoWidth > 0 && remoteVideo.videoHeight > 0) {
-          const canvas = document.createElement('canvas')
-          canvas.width = remoteVideo.videoWidth
-          canvas.height = remoteVideo.videoHeight
-          const ctx = canvas.getContext('2d')
-          if (!ctx) throw new Error('No se pudo crear el canvas')
-          ctx.drawImage(remoteVideo, 0, 0, canvas.width, canvas.height)
-
-          const blob = await new Promise((resolve, reject) => {
-            canvas.toBlob(
-              (b) => (b ? resolve(b) : reject(new Error('No se pudo generar la imagen'))),
-              'image/jpeg',
-              0.92
-            )
-          })
-
-          if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
-          this.photoUrl = URL.createObjectURL(blob)
-          this.photoSource = 'RTC'
-          if (this.activePlayerAlias) {
-            this.photoTakenAlias = this.activePlayerAlias
-            await this.updateSharedGameState({
-              foto_tomada_alias: this.activePlayerAlias
-            })
-          }
-        } else {
+        if (!this.cameraActive) {
           throw new Error('Activa la cámara para capturar la imagen procesada')
+        }
+
+        const response = await fetch(this.getWebRtcUrl('/snapshot'), {
+          method: 'GET',
+          cache: 'no-store'
+        })
+
+        if (!response.ok) {
+          throw new Error('Todavía no hay imagen procesada disponible')
+        }
+
+        const blob = await response.blob()
+        if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
+        this.photoUrl = URL.createObjectURL(blob)
+        this.photoSource = 'RTC'
+        if (this.activePlayerAlias) {
+          this.photoTakenAlias = this.activePlayerAlias
+          await this.updateSharedGameState({
+            foto_tomada_alias: this.activePlayerAlias
+          })
         }
       } catch (e) {
         this.photoError = e.message || 'Error capturando foto'
@@ -2945,17 +2944,6 @@ export default {
       if (!this.cameraActive) return
       this.cleanupCamera()
       try {
-        this.pc = new RTCPeerConnection(this.buildRtcConfiguration())
-
-        this.pc.ontrack = async (event) => {
-          const stream = new MediaStream([event.track])
-          const remoteVideo = this.$refs.remoteVideo
-          if (remoteVideo) {
-            remoteVideo.srcObject = stream
-            await remoteVideo.play().catch(() => {})
-          }
-        }
-
         this.localStream = await navigator.mediaDevices.getUserMedia({
           video: this.selectedCameraId
             ? {
@@ -2975,33 +2963,13 @@ export default {
         })
 
         const localVideo = this.$refs.localVideo
-        if (localVideo) localVideo.srcObject = this.localStream
+        if (localVideo) {
+          localVideo.srcObject = this.localStream
+          await localVideo.play().catch(() => {})
+        }
 
-        this.localStream.getTracks().forEach(track => {
-          if ('contentHint' in track) {
-            track.contentHint = 'motion'
-          }
-          const sender = this.pc.addTrack(track, this.localStream)
-          this.applySenderQualityProfile(sender)
-        })
-
-        const offer = await this.pc.createOffer()
-        await this.pc.setLocalDescription(offer)
-        await this.waitForIceGathering(this.pc, 3000)
-
-        const offerUrl = this.getWebRtcUrl('/offer')
-
-        const response = await fetch(offerUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sdp: this.pc.localDescription.sdp,
-            type: this.pc.localDescription.type
-          })
-        })
-
-        const answer = await response.json()
-        await this.pc.setRemoteDescription(answer)
+        this.startCameraUploadLoop()
+        this.startCameraSnapshotPolling()
         this.startCameraTrackingPolling()
       } catch (e) {
         this.cameraError = e.message || 'Error iniciando cámara'
@@ -3012,19 +2980,128 @@ export default {
     cleanupCamera() {
       this.centerImageModeActive = false
       this.syncCenterImageCommand(null).catch(() => {})
+      this.stopCameraUploadLoop()
+      this.stopCameraSnapshotPolling()
       this.stopCameraTrackingPolling()
       if (this.localStream) {
         this.localStream.getTracks().forEach(t => t.stop())
         this.localStream = null
       }
-      if (this.pc) {
-        this.pc.close()
-        this.pc = null
-      }
       const localVideo = this.$refs.localVideo
       if (localVideo) localVideo.srcObject = null
-      const remoteVideo = this.$refs.remoteVideo
-      if (remoteVideo) remoteVideo.srcObject = null
+      if (this.remoteFrameUrl) {
+        URL.revokeObjectURL(this.remoteFrameUrl)
+        this.remoteFrameUrl = null
+      }
+      this.cameraCanvas = null
+    },
+
+    startCameraUploadLoop() {
+      this.stopCameraUploadLoop()
+      this.uploadCameraFrame()
+      this.cameraUploadTimer = window.setInterval(() => {
+        this.uploadCameraFrame()
+      }, 180)
+    },
+
+    stopCameraUploadLoop() {
+      if (this.cameraUploadTimer) {
+        window.clearInterval(this.cameraUploadTimer)
+      }
+      this.cameraUploadTimer = null
+      this.cameraUploadPending = false
+    },
+
+    async uploadCameraFrame() {
+      if (!this.cameraActive || this.cameraUploadPending) return
+
+      const localVideo = this.$refs.localVideo
+      if (!localVideo || localVideo.videoWidth <= 0 || localVideo.videoHeight <= 0) {
+        return
+      }
+
+      this.cameraUploadPending = true
+      try {
+        if (!this.cameraCanvas) {
+          this.cameraCanvas = document.createElement('canvas')
+        }
+
+        this.cameraCanvas.width = localVideo.videoWidth
+        this.cameraCanvas.height = localVideo.videoHeight
+
+        const ctx = this.cameraCanvas.getContext('2d')
+        if (!ctx) {
+          throw new Error('No se pudo crear el canvas de captura')
+        }
+
+        ctx.drawImage(localVideo, 0, 0, this.cameraCanvas.width, this.cameraCanvas.height)
+
+        const blob = await new Promise((resolve, reject) => {
+          this.cameraCanvas.toBlob(
+            (imageBlob) => (imageBlob ? resolve(imageBlob) : reject(new Error('No se pudo capturar el frame'))),
+            'image/jpeg',
+            0.78
+          )
+        })
+
+        const response = await fetch(this.getWebRtcUrl('/frame'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'image/jpeg' },
+          body: blob,
+          cache: 'no-store'
+        })
+
+        if (!response.ok) {
+          throw new Error(`Frame HTTP ${response.status}`)
+        }
+      } catch (e) {
+        console.warn('No se pudo subir el frame al servidor:', e)
+      } finally {
+        this.cameraUploadPending = false
+      }
+    },
+
+    startCameraSnapshotPolling() {
+      this.stopCameraSnapshotPolling()
+      this.refreshRemoteSnapshot()
+      this.cameraSnapshotTimer = window.setInterval(() => {
+        this.refreshRemoteSnapshot()
+      }, 250)
+    },
+
+    stopCameraSnapshotPolling() {
+      if (this.cameraSnapshotTimer) {
+        window.clearInterval(this.cameraSnapshotTimer)
+      }
+      this.cameraSnapshotTimer = null
+      this.cameraSnapshotPending = false
+    },
+
+    async refreshRemoteSnapshot() {
+      if (!this.cameraActive || this.cameraSnapshotPending) return
+
+      this.cameraSnapshotPending = true
+      try {
+        const response = await fetch(this.getWebRtcUrl('/snapshot'), {
+          method: 'GET',
+          cache: 'no-store'
+        })
+
+        if (!response.ok) {
+          return
+        }
+
+        const blob = await response.blob()
+        const nextUrl = URL.createObjectURL(blob)
+        if (this.remoteFrameUrl) {
+          URL.revokeObjectURL(this.remoteFrameUrl)
+        }
+        this.remoteFrameUrl = nextUrl
+      } catch (e) {
+        console.warn('No se pudo refrescar la imagen procesada:', e)
+      } finally {
+        this.cameraSnapshotPending = false
+      }
     },
 
     startCameraTrackingPolling() {
@@ -3067,56 +3144,6 @@ export default {
       } finally {
         this.cameraTrackingPending = false
       }
-    },
-
-    applySenderQualityProfile(sender) {
-      if (!sender || typeof sender.getParameters !== 'function' || typeof sender.setParameters !== 'function') {
-        return
-      }
-
-      try {
-        const params = sender.getParameters() || {}
-        if (!Array.isArray(params.encodings) || !params.encodings.length) {
-          params.encodings = [{}]
-        }
-        params.encodings[0] = {
-          ...params.encodings[0],
-          maxBitrate: 2_500_000,
-          maxFramerate: 24,
-          scaleResolutionDownBy: 1
-        }
-        sender.setParameters(params).catch?.(() => {})
-      } catch (e) {
-        console.warn('No se pudieron aplicar parametros RTC de calidad:', e)
-      }
-    },
-
-    buildRtcConfiguration() {
-      const useStun = String(process.env.VUE_APP_WEBRTC_USE_STUN || '').trim().toLowerCase() === 'true'
-      return useStun
-        ? { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
-        : { iceServers: [] }
-    },
-
-    waitForIceGathering(pc, timeoutMs = 3000) {
-      return new Promise(resolve => {
-        if (pc.iceGatheringState === 'complete') return resolve()
-        const timer = window.setTimeout(() => {
-          console.warn('ICE gathering no se completó a tiempo; se envía la oferta con los candidatos disponibles.')
-          cleanup()
-          resolve()
-        }, timeoutMs)
-        const cleanup = () => {
-          window.clearTimeout(timer)
-          pc.onicegatheringstatechange = null
-        }
-        pc.onicegatheringstatechange = () => {
-          if (pc.iceGatheringState === 'complete') {
-            cleanup()
-            resolve()
-          }
-        }
-      })
     },
 
     async gotoAdmin() {
