@@ -10,5 +10,4 @@ av
 numpy
 PyYAML
 mediapipe
-ultralytics 
-opencv-python
+ultralytics

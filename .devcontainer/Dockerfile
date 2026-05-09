@@ -17,4 +17,5 @@ RUN mkdir -p /workspace
 WORKDIR /workspace
 
 COPY backend/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision \
+    && pip install --no-cache-dir -r /tmp/requirements.txt
