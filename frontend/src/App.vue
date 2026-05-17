@@ -110,11 +110,55 @@ export default {
       this.userAlias = data.color
       this.screen = 'waiting'
 
-      // 🔒 Evitar auto-start en refresh: tomar el estado actual como "visto"
+      // Primero sincronizamos reset/start actuales antes de mandar la primera ubicación.
       await this.syncGameStateOnJoin()
 
+      const initialLocation = data?.initialLocation || null
+      const initialLat = Number(initialLocation?.lat)
+      const initialLon = Number(initialLocation?.lon)
+      const initialPrecision = Number(initialLocation?.precision)
+      const hasInitialLocation = Number.isFinite(initialLat) && Number.isFinite(initialLon)
+
+      if (hasInitialLocation) {
+        const now = Date.now()
+        const playerId = this.live?.session?.playerId
+        this.lastSentAt = now
+        this.lastSentCoords = {
+          lat: initialLat,
+          lon: initialLon,
+          accuracy: Number.isFinite(initialPrecision) ? initialPrecision : null
+        }
+
+        try {
+          await fetch('/api/jugador', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              alias: this.userAlias,
+              playerId,
+              lat: initialLat,
+              lon: initialLon,
+              precision: Number.isFinite(initialPrecision) ? initialPrecision : null,
+              resetId: this.getLastResetSeen() || 0,
+              ts: now
+            })
+          })
+        } catch (e) {
+          console.warn('Error registrando jugador inicial:', e)
+        }
+
+        this.sendLocationHttpFallback({
+          lat: initialLat,
+          lon: initialLon,
+          precision: Number.isFinite(initialPrecision) ? initialPrecision : null,
+          ts: now
+        })
+      }
+
       // Registrar jugador por HTTP (necesario si no hay WS)
-      this.registerPlayerHttp()
+      if (!hasInitialLocation) {
+        this.registerPlayerHttp()
+      }
 
       // WS player
       this.live.setAlias(this.userAlias)
@@ -255,11 +299,9 @@ export default {
         ts: now
       }
 
-      // Preferimos WS para baja latencia y usamos HTTP como fallback.
-      const sentByWs = this.live.sendLocation(payload)
-      if (!sentByWs) {
-        this.sendLocationHttpFallback(payload)
-      }
+      // Enviamos por WS si está disponible, pero el backend HTTP es la fuente fiable del mapa.
+      this.live.sendLocation(payload)
+      this.sendLocationHttpFallback(payload)
     },
 
     onGeoError(err) {
@@ -405,11 +447,11 @@ export default {
         if (!res.ok) return
         const data = await res.json()
         const startId = Number(data.game_start_id ?? 0)
-        if (startId) {
+        if (Number.isFinite(startId) && startId >= 0) {
           this.markStartSeen(startId)
         }
         const resetId = Number(data.reset_id ?? 0)
-        if (resetId) {
+        if (Number.isFinite(resetId) && resetId >= 0) {
           this.markResetSeen(resetId)
         }
         this.applyGameState(data)
@@ -485,7 +527,7 @@ export default {
     },
 
     markStartSeen(startId) {
-      if (!startId) return
+      if (!Number.isFinite(startId) || startId < 0) return
       this.lastStartId = startId
       localStorage.setItem('last_start_id_v1', String(startId))
     },
@@ -505,7 +547,7 @@ export default {
     },
 
     markResetSeen(resetId) {
-      if (!resetId) return
+      if (!Number.isFinite(resetId) || resetId < 0) return
       this.lastResetId = resetId
       localStorage.setItem('last_reset_id_v1', String(resetId))
     },

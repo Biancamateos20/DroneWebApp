@@ -1290,14 +1290,6 @@ export default {
           this.applySharedGameState(msg)
         }
 
-        if (msg.type === 'snapshot' && Array.isArray(msg.players)) {
-          this.applyPlayersSnapshot(msg.players)
-        }
-
-        if (msg.type === 'player_update' && msg.player) {
-          this.upsertPlayer(msg.player)
-        }
-
         if (msg.type === 'reset') {
           this.clearMarkers()
         }
@@ -2558,8 +2550,6 @@ export default {
       this.stopPollingFallback()
       this.pollTimer = setInterval(async () => {
         await this.refreshSharedGameState()
-
-        if (this.live?.enabled && this.wsReady) return
         try {
           const url = this.getPlayersUrl()
           if (!url) return
@@ -2594,21 +2584,6 @@ export default {
     },
 
     getPlayersUrl() {
-      if (!this.live?.enabled || !this.wsReady) return '/api/jugadores'
-      let base = (process.env.VUE_APP_LIVE_URL || '').trim().replace(/\/$/, '')
-      // Evitar mixed-content o localhost en producción
-      try {
-        const isHttpsPage = window.location.protocol === 'https:'
-        const isHttpBase = base.startsWith('http://')
-        const isLocalBase = /^(http:\/\/|https:\/\/)?(localhost|127\.0\.0\.1)/i.test(base)
-        const isLocalPage = /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
-        if ((isHttpsPage && isHttpBase) || (isLocalBase && !isLocalPage)) {
-          base = ''
-        }
-      } catch (e) {
-        // ignore
-      }
-      if (base) return `${base}/jugadores`
       return '/api/jugadores'
     },
 
@@ -3306,6 +3281,7 @@ export default {
     linear-gradient(180deg, #05070d 0%, #090d16 56%, #04060b 100%);
   background-size: 36px 36px, 36px 36px, auto, auto, auto, auto;
   -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
 }
 
 .admin-container::before,
@@ -3357,7 +3333,7 @@ export default {
 .map {
   width: 96%;
   max-width: 1400px;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   height: 46vh;
   min-height: 320px;
   max-height: 480px;
@@ -3867,7 +3843,7 @@ export default {
 }
 
 .camera-card.remote .camera-video {
-  transform: scaleX(1);
+  transform: scaleX(-1);
 }
 
 .camera-guide {

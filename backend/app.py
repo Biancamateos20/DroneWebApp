@@ -142,8 +142,12 @@ def ubicacion_live():
     alias = data.get("alias")
     precision = data.get("precision")
     ts = data.get("ts")
+    raw_player_id = data.get("playerId", data.get("player_id"))
     raw_reset_id = data.get("resetId", data.get("reset_id"))
+    player_id = None
     client_reset_id = None
+    if raw_player_id is not None:
+        player_id = str(raw_player_id).strip() or None
     if raw_reset_id is not None:
         try:
             client_reset_id = int(raw_reset_id)
@@ -153,12 +157,26 @@ def ubicacion_live():
     if lat is None or lon is None or alias is None:
         return jsonify({"error": "Datos incompletos"}), 400
 
+    alias = str(alias).strip()
+    if not alias:
+        return jsonify({"error": "Alias inválido"}), 400
+
     if client_reset_id is not None and client_reset_id != reset_id:
         return jsonify({"error": "Sesion antigua ignorada", "stale_reset": True}), 409
 
+    if player_id:
+        prev_alias = player_alias_by_id.get(player_id)
+        if prev_alias and prev_alias != alias:
+            colores_ocupados.discard(prev_alias)
+            jugadores[:] = [j for j in jugadores if j.get("alias") != prev_alias]
+        player_alias_by_id[player_id] = alias
+
     if alias not in colores_ocupados:
         colores_ocupados.add(alias)
-        jugadores.append({"lat": lat, "lon": lon, "alias": alias})
+        payload = {"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts}
+        if player_id:
+            payload["playerId"] = player_id
+        jugadores.append(payload)
         print(f"Jugador auto-registrado → {alias} ({lat}, {lon})")
     else:
         found = False
@@ -168,11 +186,16 @@ def ubicacion_live():
                 j["lon"] = lon
                 j["precision"] = precision
                 j["ts"] = ts
+                if player_id:
+                    j["playerId"] = player_id
                 found = True
                 break
 
         if not found:
-            jugadores.append({"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts})
+            payload = {"lat": lat, "lon": lon, "alias": alias, "precision": precision, "ts": ts}
+            if player_id:
+                payload["playerId"] = player_id
+            jugadores.append(payload)
 
     if VM_HTTP_PROXY_ENABLED:
         try:
