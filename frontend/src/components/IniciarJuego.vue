@@ -301,17 +301,8 @@
                 :class="cameraGuidanceDirectionClass"
                 :style="cameraGuidanceStyle"
               >
-                <div v-if="cameraGuidanceDirection === 'left'" class="camera-guide-side left">
-                  <span>←</span>
-                  <span>←</span>
-                  <span>←</span>
-                </div>
+                <div v-if="cameraGuidanceLineVisible" class="camera-guide-line" :style="cameraGuidanceLineStyle"></div>
                 <div class="camera-guide-badge">{{ cameraGuidanceLabel }}</div>
-                <div v-if="cameraGuidanceDirection === 'right'" class="camera-guide-side right">
-                  <span>→</span>
-                  <span>→</span>
-                  <span>→</span>
-                </div>
               </div>
             </div>
           </div>
@@ -325,17 +316,8 @@
                 :class="cameraGuidanceDirectionClass"
                 :style="cameraGuidanceStyle"
               >
-                <div v-if="cameraGuidanceDirection === 'left'" class="camera-guide-side left">
-                  <span>←</span>
-                  <span>←</span>
-                  <span>←</span>
-                </div>
+                <div v-if="cameraGuidanceLineVisible" class="camera-guide-line" :style="cameraGuidanceLineStyle"></div>
                 <div class="camera-guide-badge">{{ cameraGuidanceLabel }}</div>
-                <div v-if="cameraGuidanceDirection === 'right'" class="camera-guide-side right">
-                  <span>→</span>
-                  <span>→</span>
-                  <span>→</span>
-                </div>
               </div>
             </div>
           </div>
@@ -560,6 +542,9 @@ export default {
     cameraGuidanceVisible() {
       return this.cameraGuidanceDirection !== 'none'
     },
+    cameraGuidanceLineVisible() {
+      return this.cameraGuidanceDirection === 'left' || this.cameraGuidanceDirection === 'right'
+    },
     cameraGuidanceDirectionClass() {
       if (this.cameraGuidanceDirection === 'left') return 'guide-left'
       if (this.cameraGuidanceDirection === 'right') return 'guide-right'
@@ -576,6 +561,25 @@ export default {
         ? 0.74
         : Math.max(0.55, Math.min(1, 0.45 + (offsetPercent / 100)))
       return { opacity: String(opacity) }
+    },
+    cameraGuidanceLineStyle() {
+      try {
+        const ratio = Math.abs(Number(this.cameraTracking?.offsetRatio || 0))
+        const normalized = Math.max(0, Math.min(1, ratio))
+        const width = 10 + (normalized * 40)
+
+        if (this.cameraGuidanceDirection === 'left') {
+          return { left: '14%', width: `${width}%` }
+        }
+
+        if (this.cameraGuidanceDirection === 'right') {
+          return { right: '14%', width: `${width}%` }
+        }
+      } catch (e) {
+        console.warn('No se pudo calcular la línea de guiado:', e)
+      }
+
+      return { width: '0%' }
     },
     cameraTrackingMarkerStyle() {
       const left = 50 - (this.cameraCommandNormalizedOffset * 44)
@@ -3856,27 +3860,40 @@ export default {
   pointer-events: none;
 }
 
-.camera-guide-side {
+.camera-guide-line {
   position: absolute;
   top: 50%;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: clamp(1.8rem, 2.8vw, 2.8rem);
-  font-weight: 900;
-  text-shadow: 0 0 18px rgba(15, 23, 42, 0.72);
+  height: 6px;
+  border-radius: 999px;
+  transform: translateY(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 0 0 1px rgba(15, 23, 42, 0.22),
+    0 0 18px rgba(15, 23, 42, 0.28);
 }
 
-.camera-guide-side.left {
-  left: 18px;
-  color: #f59e0b;
-  animation: camera-guide-pulse-left 0.8s ease-in-out infinite alternate;
+.camera-guide.guide-left .camera-guide-line {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(245, 158, 11, 0.95) 0 12px,
+      rgba(245, 158, 11, 0.95) 12px,
+      rgba(245, 158, 11, 0.08) 12px,
+      rgba(245, 158, 11, 0.08) 18px
+    ),
+    linear-gradient(90deg, rgba(245, 158, 11, 0.18), rgba(253, 224, 71, 0.36));
 }
 
-.camera-guide-side.right {
-  right: 18px;
-  color: #38bdf8;
-  animation: camera-guide-pulse-right 0.8s ease-in-out infinite alternate;
+.camera-guide.guide-right .camera-guide-line {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(56, 189, 248, 0.95) 0 12px,
+      rgba(56, 189, 248, 0.95) 12px,
+      rgba(56, 189, 248, 0.08) 12px,
+      rgba(56, 189, 248, 0.08) 18px
+    ),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.18), rgba(125, 211, 252, 0.36));
 }
 
 .camera-guide-badge {
@@ -3906,28 +3923,6 @@ export default {
   transform: translate(-50%, -50%);
   background: rgba(22, 101, 52, 0.7);
   border-color: rgba(134, 239, 172, 0.32);
-}
-
-@keyframes camera-guide-pulse-left {
-  from {
-    transform: translate(0, -50%);
-    opacity: 0.5;
-  }
-  to {
-    transform: translate(-6px, -50%);
-    opacity: 1;
-  }
-}
-
-@keyframes camera-guide-pulse-right {
-  from {
-    transform: translate(0, -50%);
-    opacity: 0.5;
-  }
-  to {
-    transform: translate(6px, -50%);
-    opacity: 1;
-  }
 }
 
 .camera-bay.zoom-local .camera-card.remote,
