@@ -847,7 +847,7 @@ watch(
 }
 
 .remote-video {
-  transform: none;
+  transform: scaleX(-1);
   image-rendering: auto;
 }
 

@@ -199,17 +199,6 @@
               Siguiente color elegido: {{ nextPlayerAlias }}
             </p>
 
-            <div class="panel-actions lab-actions">
-              <button
-                class="btn goto"
-                @click="gotoAdmin"
-                :disabled="gotoLoading || !gotoReady || !adminPos"
-                title="Ir a la ubicación del administrador"
-              >
-                🧭 Ir al admin
-              </button>
-            </div>
-
             <div v-if="registeredPlayers.length" class="player-list">
               <button
                 v-for="player in registeredPlayers"
@@ -331,14 +320,12 @@
     <p v-if="connectLoading" class="subtitle">Conectando dron…</p>
     <p v-if="cameraLoading" class="subtitle">Activando cámara…</p>
     <p v-if="gpsLoading" class="subtitle">Consultando precisión…</p>
-    <p v-if="gotoLoading" class="subtitle">Enviando GOTO…</p>
     <p v-if="speedLoading" class="subtitle">Enviando velocidad…</p>
     <p v-if="gotoPlayerLoading" class="subtitle">Enviando GOTO al jugador…</p>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="photoError" class="error">{{ photoError }}</p>
     <p v-if="landError" class="error">{{ landError }}</p>
     <p v-if="gpsError" class="error">{{ gpsError }}</p>
-    <p v-if="gotoError" class="error">{{ gotoError }}</p>
     <p v-if="gotoPlayerError" class="error">{{ gotoPlayerError }}</p>
 
     <div v-if="photoUrl" class="photo-panel">
@@ -448,8 +435,6 @@ export default {
       adminMarker: null,
       adminAcc: null,
       adminCentered: false,
-      gotoLoading: false,
-      gotoError: null,
 
       geofenceMode: false,
       geofencePoints: [],
@@ -626,7 +611,7 @@ export default {
     gotoStatus() {
       if (!this.droneConnected) return 'Conecta el dron para habilitar la navegación.'
       if (!this.droneInAir) return 'Despega el dron antes de enviar un GOTO.'
-      return 'Ya puedes enviarlo al admin o al jugador seleccionado.'
+      return 'Ya puedes enviarlo al jugador seleccionado.'
     },
     canApplyGeofenceStopDistance() {
       return this.geofencePoints.length >= 3
@@ -897,13 +882,22 @@ export default {
     },
 
     async toggleCenterImageMode() {
-      const nextState = !this.centerImageModeActive
-      this.centerImageModeActive = nextState
-      if (nextState) {
-        await this.syncCenterImageCommand(this.cameraTracking)
-        return
+      try {
+        const nextState = !this.centerImageModeActive
+        this.centerImageModeActive = nextState
+        if (nextState) {
+          this.gotoSpeed = 0.5
+          console.log('[IniciarJuego] Ajustando velocidad a 0.5 m/s para centrar imagen')
+          await this.mqttPublish(this.mqttTopics.speed, '0.5')
+          await this.syncCenterImageCommand(this.cameraTracking)
+          return
+        }
+        await this.setCenterImageCommand('Stop').catch(() => {})
+      } catch (e) {
+        console.warn('No se pudo activar el centrado automático:', e)
+        this.centerImageModeActive = false
+        this.speedError = e.message || 'Error ajustando la velocidad para centrar imagen'
       }
-      await this.setCenterImageCommand('Stop').catch(() => {})
     },
 
     buildConnectPayload() {
@@ -3125,32 +3119,6 @@ export default {
       }
     },
 
-    async gotoAdmin() {
-      this.gotoError = null
-      if (!this.adminPos) {
-        this.gotoError = 'Ubicación del administrador no disponible'
-        return
-      }
-      this.gotoLoading = true
-      try {
-        await this.publishGoto(this.adminPos.lat, this.adminPos.lon)
-        this.activePlayerAlias = null
-        this.nextPlayerAlias = null
-        this.photoTakenAlias = null
-        this.pendingVoiceTargetAlias = null
-        await this.updateSharedGameState({
-          jugador_actual_alias: null,
-          siguiente_jugador_alias: null,
-          foto_tomada_alias: null,
-          voz_objetivo_alias: null
-        })
-      } catch (e) {
-        this.gotoError = e.message || 'Error enviando GOTO'
-      } finally {
-        this.gotoLoading = false
-      }
-    },
-
     getPlayerColor(alias) {
       const raw = String(alias || '').trim()
       if (!raw) return '#6b7280'
@@ -3203,6 +3171,9 @@ export default {
       }
       this.gotoPlayerLoading = true
       try {
+        this.gotoSpeed = 1.0
+        console.log('[IniciarJuego] Ajustando velocidad a 1.0 m/s para ir al jugador')
+        await this.mqttPublish(this.mqttTopics.speed, '1')
         await this.publishGoto(this.selectedPlayer.lat, this.selectedPlayer.lon)
         this.activePlayerAlias = this.selectedPlayer.alias
         this.nextPlayerAlias = null
