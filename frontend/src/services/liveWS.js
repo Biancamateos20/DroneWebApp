@@ -62,9 +62,10 @@ export class LiveWS {
     this.availabilityChecked = false
     this.availabilityPromise = null
 
-    const raw = localStorage.getItem('player_session_v1')
+    const raw = sessionStorage.getItem('player_session_v1')
     this.session = raw ? JSON.parse(raw) : { playerId: uuidv4(), alias: null }
-    localStorage.setItem('player_session_v1', JSON.stringify(this.session))
+    sessionStorage.setItem('player_session_v1', JSON.stringify(this.session))
+    localStorage.removeItem('player_session_v1')
 
     if (!this.enabled) {
       if (this.baseUrl && !this.liveEnabledFlag) {
@@ -77,7 +78,7 @@ export class LiveWS {
 
   setAlias(alias) {
     this.session.alias = alias
-    localStorage.setItem('player_session_v1', JSON.stringify(this.session))
+    sessionStorage.setItem('player_session_v1', JSON.stringify(this.session))
   }
 
   _wsUrl() {

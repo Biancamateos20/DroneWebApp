@@ -47,7 +47,7 @@
       </p>
 
       <p v-if="isCurrentPlayer && !canPickNextPlayer" class="turn-note">
-        Cuando el dron llegue y te hagan la foto, podrás decir el siguiente color.
+        Cuando el dron termine el GOTO hasta tu posición, podrás decir el siguiente color.
       </p>
 
       <p v-if="selectedNextPlayerAlias" class="turn-selected">
@@ -129,7 +129,7 @@ const props = defineProps({
     type: String,
     default: null
   },
-  photoTakenAlias: {
+  gotoCompletedAlias: {
     type: String,
     default: null
   }
@@ -168,9 +168,9 @@ const normalizedSelectedNextPlayerAlias = computed(() => {
   return String(props.selectedNextPlayerAlias).trim().toUpperCase() || null
 })
 
-const normalizedPhotoTakenAlias = computed(() => {
-  if (!props.photoTakenAlias) return null
-  return String(props.photoTakenAlias).trim().toUpperCase() || null
+const normalizedGotoCompletedAlias = computed(() => {
+  if (!props.gotoCompletedAlias) return null
+  return String(props.gotoCompletedAlias).trim().toUpperCase() || null
 })
 
 const isCurrentPlayer = computed(() => {
@@ -180,7 +180,7 @@ const isCurrentPlayer = computed(() => {
 const canPickNextPlayer = computed(() => {
   return !!props.droneInAir &&
     isCurrentPlayer.value &&
-    normalizedPhotoTakenAlias.value === normalizedUserAlias.value
+    normalizedGotoCompletedAlias.value === normalizedUserAlias.value
 })
 
 const availablePlayers = computed(() => {

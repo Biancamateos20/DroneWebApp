@@ -19,7 +19,7 @@
       :drone-in-air="droneInAir"
       :active-player-alias="activePlayerAlias"
       :selected-next-player-alias="selectedNextPlayerAlias"
-      :photo-taken-alias="photoTakenAlias"
+      :goto-completed-alias="gotoCompletedAlias"
       @pick-next-player="handleNextPlayerSelected"
     />
   </div>
@@ -56,6 +56,7 @@ export default {
       droneInAir: false,
       activePlayerAlias: null,
       selectedNextPlayerAlias: null,
+      gotoCompletedAlias: null,
       photoTakenAlias: null,
 
       lastStartId: null,
@@ -488,6 +489,13 @@ export default {
         this.photoTakenAlias = alias
       }
 
+      if ('goto_completado_alias' in data) {
+        const alias = data.goto_completado_alias == null
+          ? null
+          : (String(data.goto_completado_alias).trim().toUpperCase() || null)
+        this.gotoCompletedAlias = alias
+      }
+
       if (this.screen === 'waiting' && this.droneInAir) {
         this.screen = 'webrtc'
       }
@@ -561,12 +569,14 @@ export default {
       this.droneInAir = false
       this.activePlayerAlias = null
       this.selectedNextPlayerAlias = null
+      this.gotoCompletedAlias = null
       this.photoTakenAlias = null
       this.lastSentAt = 0
       this.lastSentCoords = null
       this.lastHttpLiveSentAt = 0
       this.httpLiveSending = false
       try {
+        sessionStorage.removeItem('player_session_v1')
         localStorage.removeItem('player_session_v1')
       } catch (e) {
         // ignore

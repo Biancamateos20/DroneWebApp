@@ -27,6 +27,7 @@ player_alias_by_id = {}
 jugador_actual_alias = None
 siguiente_jugador_alias = None
 foto_tomada_alias = None
+goto_completado_alias = None
 voz_objetivo_alias = None
 voz_comando_id = 0
 
@@ -258,7 +259,8 @@ def iniciar_juego():
 def reset():
     # Reinicia el estado local y solicita reset en la VM.
     global juego_en_curso, dron_despegado, colores_ocupados, jugadores, reset_id, player_alias_by_id
-    global jugador_actual_alias, siguiente_jugador_alias, foto_tomada_alias, voz_objetivo_alias, voz_comando_id
+    global jugador_actual_alias, siguiente_jugador_alias, foto_tomada_alias, goto_completado_alias
+    global voz_objetivo_alias, voz_comando_id
 
     colores_ocupados.clear()
     jugadores.clear()
@@ -268,6 +270,7 @@ def reset():
     jugador_actual_alias = None
     siguiente_jugador_alias = None
     foto_tomada_alias = None
+    goto_completado_alias = None
     voz_objetivo_alias = None
     voz_comando_id = 0
     reset_id += 1
@@ -287,6 +290,7 @@ def reset():
         "jugador_actual_alias": jugador_actual_alias,
         "siguiente_jugador_alias": siguiente_jugador_alias,
         "foto_tomada_alias": foto_tomada_alias,
+        "goto_completado_alias": goto_completado_alias,
         "voz_objetivo_alias": voz_objetivo_alias,
         "voz_comando_id": voz_comando_id
     }), 200
@@ -415,7 +419,7 @@ def webrtc_snapshot():
 @app.route("/estado-juego", methods=["GET", "POST"])
 def estado_juego():
     global juego_en_curso, dron_despegado, jugador_actual_alias, siguiente_jugador_alias
-    global foto_tomada_alias, voz_objetivo_alias, voz_comando_id
+    global foto_tomada_alias, goto_completado_alias, voz_objetivo_alias, voz_comando_id
 
     if request.method == "POST":
         data = request.get_json() or {}
@@ -450,6 +454,14 @@ def estado_juego():
                 alias = str(value).strip().upper()
                 foto_tomada_alias = alias or None
 
+        if "goto_completado_alias" in data:
+            value = data.get("goto_completado_alias")
+            if value is None:
+                goto_completado_alias = None
+            else:
+                alias = str(value).strip().upper()
+                goto_completado_alias = alias or None
+
         if "voz_objetivo_alias" in data:
             value = data.get("voz_objetivo_alias")
             if value is None:
@@ -468,6 +480,7 @@ def estado_juego():
         "jugador_actual_alias": jugador_actual_alias,
         "siguiente_jugador_alias": siguiente_jugador_alias,
         "foto_tomada_alias": foto_tomada_alias,
+        "goto_completado_alias": goto_completado_alias,
         "voz_objetivo_alias": voz_objetivo_alias,
         "voz_comando_id": voz_comando_id,
         "reset_id": reset_id,
@@ -477,7 +490,7 @@ def estado_juego():
 
 @app.route("/voz-color", methods=["POST"])
 def voz_color():
-    global siguiente_jugador_alias, foto_tomada_alias, voz_objetivo_alias, voz_comando_id
+    global siguiente_jugador_alias, goto_completado_alias, voz_objetivo_alias, voz_comando_id
 
     data = request.get_json() or {}
     texto = str(data.get("texto") or "").strip()
@@ -492,8 +505,8 @@ def voz_color():
     if jugador_actual_alias != current_alias:
         return jsonify({"ok": False, "error": "Ahora mismo no te toca enviar el dron"}), 409
 
-    if foto_tomada_alias != current_alias:
-        return jsonify({"ok": False, "error": "Primero hay que hacer la foto del jugador actual"}), 409
+    if goto_completado_alias != current_alias:
+        return jsonify({"ok": False, "error": "Primero tiene que terminar el GOTO del jugador actual"}), 409
 
     aliases_disponibles = []
     for jugador in jugadores:
@@ -508,6 +521,7 @@ def voz_color():
         return jsonify({"ok": False, "error": "No se ha reconocido un color registrado"}), 404
 
     siguiente_jugador_alias = alias_resuelto
+    goto_completado_alias = None
     voz_objetivo_alias = alias_resuelto
     voz_comando_id += 1
 

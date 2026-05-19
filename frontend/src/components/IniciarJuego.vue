@@ -211,7 +211,7 @@
                 <span class="player-dot" :style="{ backgroundColor: getPlayerColor(player.alias) }"></span>
                 <span class="player-name">{{ player.alias }}</span>
                 <span class="player-state" :class="{ offline: player.offline }">
-                  {{ player.offline ? 'sin señal' : 'activo' }}
+                  {{ player.status }}
                 </span>
               </button>
             </div>
@@ -219,16 +219,19 @@
               <button
                 class="btn goto-user"
                 @click="gotoSelectedPlayer"
-                :disabled="gotoPlayerLoading || !droneConnected || !droneInAir || !selectedPlayer"
+                :disabled="gotoPlayerLoading || !droneConnected || !droneInAir || !selectedPlayer || !selectedPlayer.hasLocation"
                 title="Enviar dron al jugador seleccionado"
               >
                 🎯 Ir al jugador
               </button>
             </div>
 
-            <p v-if="selectedPlayer" class="mini-note">
+            <p v-if="selectedPlayer && selectedPlayer.hasLocation" class="mini-note">
               Objetivo: {{ selectedPlayer.alias }} ·
               {{ selectedPlayer.lat.toFixed(6) }}, {{ selectedPlayer.lon.toFixed(6) }}
+            </p>
+            <p v-else-if="selectedPlayer" class="mini-note">
+              Objetivo: {{ selectedPlayer.alias }} · esperando ubicación del jugador.
             </p>
           </div>
         </div>
@@ -451,15 +454,20 @@ export default {
       geofencePendingFromMqtt: null,
 
       playersByAlias: {},
+      occupiedPlayerAliases: [],
       playerAnimations: {},
       selectedPlayerAlias: null,
       activePlayerAlias: null,
       nextPlayerAlias: null,
+      gotoCompletedAlias: null,
       photoTakenAlias: null,
       pendingVoiceTargetAlias: null,
       pendingVoiceCommandId: 0,
       lastProcessedVoiceCommandId: 0,
       voiceGotoLoading: false,
+      gotoTargetAlias: null,
+      gotoTargetLat: null,
+      gotoTargetLon: null,
       geofenceStopDistance: 5,
       gotoPlayerLoading: false,
       gotoPlayerError: null
@@ -573,13 +581,42 @@ export default {
       return { left: `${Math.max(6, Math.min(94, left))}%` }
     },
     registeredPlayers() {
-      return Object.values(this.playersByAlias)
-        .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon))
+      const aliases = Array.from(new Set([
+        ...this.occupiedPlayerAliases,
+        ...Object.keys(this.playersByAlias)
+      ]))
+
+      return aliases
+        .map((alias) => {
+          const player = this.playersByAlias[alias] || null
+          const hasLocation = Number.isFinite(player?.lat) && Number.isFinite(player?.lon)
+
+          if (!player) {
+            return {
+              alias,
+              lat: null,
+              lon: null,
+              precision: null,
+              ts: null,
+              offline: true,
+              hasLocation: false,
+              status: 'sin ubicar'
+            }
+          }
+
+          return {
+            ...player,
+            hasLocation,
+            status: hasLocation
+              ? (player.offline ? 'sin señal' : 'activo')
+              : 'sin ubicar'
+          }
+        })
         .sort((a, b) => String(a.alias).localeCompare(String(b.alias)))
     },
     selectedPlayer() {
       if (!this.selectedPlayerAlias) return null
-      return this.playersByAlias[this.selectedPlayerAlias] || null
+      return this.registeredPlayers.find((player) => player.alias === this.selectedPlayerAlias) || null
     },
     telemetryAltitudeTrendText() {
       if (!Number.isFinite(this.telemetryAltDisplay) || !this.droneAltTrend) return ''
@@ -613,6 +650,9 @@ export default {
     gotoStatus() {
       if (!this.droneConnected) return 'Conecta el dron para habilitar la navegación.'
       if (!this.droneInAir) return 'Despega el dron antes de enviar un GOTO.'
+      if (this.selectedPlayer && !this.selectedPlayer.hasLocation) {
+        return 'Ese jugador todavía no ha compartido su ubicación.'
+      }
       return 'Ya puedes enviarlo al jugador seleccionado.'
     },
     canApplyGeofenceStopDistance() {
@@ -657,13 +697,18 @@ export default {
       }
       this.activePlayerAlias = null
       this.nextPlayerAlias = null
+      this.gotoCompletedAlias = null
       this.photoTakenAlias = null
       this.pendingVoiceTargetAlias = null
       this.selectedPlayerAlias = null
+      this.gotoTargetAlias = null
+      this.gotoTargetLat = null
+      this.gotoTargetLon = null
       this.updateSharedGameState({
         dron_despegado: false,
         jugador_actual_alias: null,
         siguiente_jugador_alias: null,
+        goto_completado_alias: null,
         foto_tomada_alias: null,
         voz_objetivo_alias: null
       })
@@ -1123,6 +1168,7 @@ export default {
           ts: now
         }
         this.updateDroneLocation(telemetryLoc.lat, telemetryLoc.lon, telemetryLoc.precision, now)
+        this.syncGotoCompletion()
       }
 
       this.updateDroneMarkerVisuals()
@@ -1961,6 +2007,7 @@ export default {
       Object.keys(this.playersByAlias).forEach((alias) => this.removePlayer(alias))
       this.markers = {}
       this.playersByAlias = {}
+      this.occupiedPlayerAliases = []
       this.playerAnimations = {}
       this.selectedPlayerAlias = null
       this.gotoPlayerError = null
@@ -2562,6 +2609,10 @@ export default {
       this.lastTelemetryTs = null
       this.altitudeAnimation = null
       this.droneAltTrend = 'stable'
+      this.gotoCompletedAlias = null
+      this.gotoTargetAlias = null
+      this.gotoTargetLat = null
+      this.gotoTargetLon = null
     },
 
     clearAdminLocation() {
@@ -2582,8 +2633,11 @@ export default {
 
     startPollingFallback() {
       this.stopPollingFallback()
+      this.refreshSharedGameState()
+      this.refreshOccupiedPlayerAliases()
       this.pollTimer = setInterval(async () => {
         await this.refreshSharedGameState()
+        await this.refreshOccupiedPlayerAliases()
         try {
           const url = this.getPlayersUrl()
           if (!url) return
@@ -2615,6 +2669,28 @@ export default {
     stopPollingFallback() {
       if (this.pollTimer) clearInterval(this.pollTimer)
       this.pollTimer = null
+    },
+
+    async refreshOccupiedPlayerAliases() {
+      try {
+        const res = await fetch('/api/colores', { cache: 'no-store' })
+        if (!res.ok) return
+
+        const aliases = await res.json()
+        if (!Array.isArray(aliases)) return
+
+        this.occupiedPlayerAliases = Array.from(new Set(
+          aliases
+            .map((alias) => String(alias || '').trim().toUpperCase())
+            .filter((alias) => !!alias)
+        ))
+
+        if (!this.selectedPlayerAlias && this.occupiedPlayerAliases.length) {
+          this.selectedPlayerAlias = [...this.occupiedPlayerAliases].sort((a, b) => a.localeCompare(b))[0]
+        }
+      } catch (e) {
+        console.warn('Error cargando colores ocupados:', e)
+      }
     },
 
     getPlayersUrl() {
@@ -2655,6 +2731,12 @@ export default {
         this.photoTakenAlias = data.foto_tomada_alias == null
           ? null
           : (String(data.foto_tomada_alias).trim().toUpperCase() || null)
+      }
+
+      if ('goto_completado_alias' in data) {
+        this.gotoCompletedAlias = data.goto_completado_alias == null
+          ? null
+          : (String(data.goto_completado_alias).trim().toUpperCase() || null)
       }
 
       if ('voz_objetivo_alias' in data) {
@@ -3197,6 +3279,50 @@ export default {
         h: Number(this.takeoffAlt),
         speed
       }))
+      return target
+    },
+
+    distanceMeters(lat1, lon1, lat2, lon2) {
+      const earthRadius = 6371000
+      const toRad = (degrees) => (degrees * Math.PI) / 180
+      const dLat = toRad(lat2 - lat1)
+      const dLon = toRad(lon2 - lon1)
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
+      return 2 * earthRadius * Math.asin(Math.sqrt(a))
+    },
+
+    syncGotoCompletion() {
+      try {
+        if (!this.gotoTargetAlias) return
+        if (!Number.isFinite(Number(this.gotoTargetLat)) || !Number.isFinite(Number(this.gotoTargetLon))) return
+        if (this.gotoCompletedAlias === this.gotoTargetAlias) return
+
+        const droneLat = Number(this.dronePos?.lat)
+        const droneLon = Number(this.dronePos?.lon)
+        if (!Number.isFinite(droneLat) || !Number.isFinite(droneLon)) return
+
+        const distance = this.distanceMeters(
+          droneLat,
+          droneLon,
+          Number(this.gotoTargetLat),
+          Number(this.gotoTargetLon)
+        )
+        const arrivalThresholdMeters = 2.5
+
+        if (!Number.isFinite(distance) || distance > arrivalThresholdMeters) return
+
+        this.gotoCompletedAlias = this.gotoTargetAlias
+        console.log(`[IniciarJuego] GOTO completado para ${this.gotoTargetAlias} a ${distance.toFixed(2)} m`)
+        this.updateSharedGameState({
+          goto_completado_alias: this.gotoTargetAlias
+        }).catch((e) => {
+          console.warn('Error guardando GOTO completado:', e)
+        })
+      } catch (e) {
+        console.warn('Error comprobando fin de GOTO:', e)
+      }
     },
 
     async gotoSelectedPlayer() {
@@ -3210,14 +3336,19 @@ export default {
         this.gotoSpeed = 1.0
         console.log('[IniciarJuego] Ajustando velocidad a 1.0 m/s para ir al jugador')
         await this.mqttPublish(this.mqttTopics.speed, '1')
-        await this.publishGoto(this.selectedPlayer.lat, this.selectedPlayer.lon)
+        const target = await this.publishGoto(this.selectedPlayer.lat, this.selectedPlayer.lon)
+        this.gotoTargetAlias = this.selectedPlayer.alias
+        this.gotoTargetLat = target.lat
+        this.gotoTargetLon = target.lon
         this.activePlayerAlias = this.selectedPlayer.alias
         this.nextPlayerAlias = null
+        this.gotoCompletedAlias = null
         this.photoTakenAlias = null
         this.pendingVoiceTargetAlias = null
         await this.updateSharedGameState({
           jugador_actual_alias: this.selectedPlayer.alias,
           siguiente_jugador_alias: null,
+          goto_completado_alias: null,
           foto_tomada_alias: null,
           voz_objetivo_alias: null
         })
@@ -3243,15 +3374,20 @@ export default {
       this.lastProcessedVoiceCommandId = this.pendingVoiceCommandId
 
       try {
-        await this.publishGoto(target.lat, target.lon)
+        const gotoTarget = await this.publishGoto(target.lat, target.lon)
+        this.gotoTargetAlias = target.alias
+        this.gotoTargetLat = gotoTarget.lat
+        this.gotoTargetLon = gotoTarget.lon
         this.activePlayerAlias = target.alias
         this.nextPlayerAlias = null
+        this.gotoCompletedAlias = null
         this.photoTakenAlias = null
         this.pendingVoiceTargetAlias = null
         this.selectedPlayerAlias = target.alias
         await this.updateSharedGameState({
           jugador_actual_alias: target.alias,
           siguiente_jugador_alias: null,
+          goto_completado_alias: null,
           foto_tomada_alias: null,
           voz_objetivo_alias: null
         })
