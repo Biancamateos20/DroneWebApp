@@ -505,11 +505,10 @@ watch(
 
 .webrtc-shell {
   min-height: 100vh;
-  min-height: 100dvh;
+  min-height: 100svh;
   position: relative;
   overflow-x: hidden;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow-y: visible;
   color: #eef1f6;
   font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
   width: 100%;
@@ -649,6 +648,7 @@ watch(
 }
 
 .remote-video {
+  transform: scaleX(-1);
   image-rendering: auto;
 }
 

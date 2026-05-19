@@ -443,6 +443,8 @@ export default {
       geofencePolygon: null,
       geofenceMask: null,
       stopPreviewLayers: {},
+      stopPreviewRefreshFrame: null,
+      stopPreviewState: {},
       geofenceDirty: false,
       geofenceNotice: null,
       geofenceError: null,
@@ -702,6 +704,10 @@ export default {
     beforeUnmount() {
     if (this.photoUrl) URL.revokeObjectURL(this.photoUrl)
     this.cleanupCamera()
+    if (this.stopPreviewRefreshFrame) {
+      window.cancelAnimationFrame(this.stopPreviewRefreshFrame)
+      this.stopPreviewRefreshFrame = null
+    }
     if (navigator.mediaDevices && navigator.mediaDevices.ondevicechange === this.deviceChangeHandler) {
       navigator.mediaDevices.ondevicechange = null
     }
@@ -1567,12 +1573,18 @@ export default {
         try { layers.blockedLine?.remove?.() } catch (e) { console.warn('Error', e) }
         try { layers.marker?.remove?.() } catch (e) { console.warn('Error', e) }
         delete this.stopPreviewLayers[key]
+        delete this.stopPreviewState[key]
       })
     },
 
     refreshAllStopPreviews() {
-      this.refreshStopPreview('admin')
-      this.refreshStopPreview('player')
+      if (this.stopPreviewRefreshFrame) return
+
+      this.stopPreviewRefreshFrame = window.requestAnimationFrame(() => {
+        this.stopPreviewRefreshFrame = null
+        this.refreshStopPreview('admin')
+        this.refreshStopPreview('player')
+      })
     },
 
     refreshStopPreview(kind) {
@@ -1612,6 +1624,32 @@ export default {
       const style = this.getStopPreviewStyle(kind)
       const stopLatLng = [resolved.lat, resolved.lon]
       const targetLatLng = [targetLat, targetLon]
+      const tooltip = `${style.tooltip} · ${resolved.appliedBackoffMeters.toFixed(1)} m antes`
+      const nextState = JSON.stringify({
+        route: hasDronePosition
+          ? [
+              Number(droneLat.toFixed(7)),
+              Number(droneLon.toFixed(7)),
+              Number(resolved.lat.toFixed(7)),
+              Number(resolved.lon.toFixed(7))
+            ]
+          : [],
+        blocked: [
+          Number(resolved.lat.toFixed(7)),
+          Number(resolved.lon.toFixed(7)),
+          Number(targetLat.toFixed(7)),
+          Number(targetLon.toFixed(7))
+        ],
+        tooltip,
+        color: style.color,
+        blockedColor: style.blockedColor
+      })
+
+      if (this.stopPreviewState[kind] === nextState) {
+        return
+      }
+
+      this.stopPreviewState[kind] = nextState
 
       layers.routeLine.setStyle({ color: style.color })
       layers.routeLine.setLatLngs(hasDronePosition ? [[droneLat, droneLon], stopLatLng] : [])
@@ -1621,9 +1659,7 @@ export default {
 
       layers.marker.setStyle({ fillColor: style.color })
       layers.marker.setLatLng(stopLatLng)
-      layers.marker.setTooltipContent(
-        `${style.tooltip} · ${resolved.appliedBackoffMeters.toFixed(1)} m antes`
-      )
+      layers.marker.setTooltipContent(tooltip)
 
       layers.routeLine.bringToFront()
       layers.blockedLine.bringToFront()

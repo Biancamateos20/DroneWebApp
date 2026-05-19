@@ -589,7 +589,7 @@ body {
 #app {
   background-color: black;
   min-height: 100vh;
-  min-height: 100dvh;
+  min-height: 100svh;
   width: 100%;
 }
 </style>
