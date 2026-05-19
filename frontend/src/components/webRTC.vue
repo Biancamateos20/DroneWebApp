@@ -11,44 +11,23 @@
       <div>
         <p class="eyebrow">Drone Mission Control</p>
         <h2 class="title">Vision RTC</h2>
-        <p class="subtitle">Camara local y video procesado del backend</p>
+        <p class="subtitle">Imagen procesada compartida desde el panel de admin</p>
       </div>
-
-      <select v-model="selectedCameraId" class="camera-select" @change="startStream">
-        <option
-          v-for="cam in cameras"
-          :key="cam.deviceId"
-          :value="cam.deviceId"
-        >
-          {{ cam.label || "Cámara sin nombre" }}
-        </option>
-      </select>
     </header>
 
     <section class="video-grid">
-      <article class="video-card">
-        <h3 class="video-title">Camara Local</h3>
-        <div class="video-frame">
-          <video
-            ref="localVideo"
-            class="camera-video local-video"
-            autoplay
-            playsinline
-            muted
-          ></video>
-        </div>
-      </article>
-
       <article class="video-card remote-card">
-        <h3 class="video-title">Video Procesado</h3>
+        <h3 class="video-title">Vista del admin</h3>
         <div class="video-frame remote-frame">
-          <video
-            ref="remoteVideo"
+          <img
+            v-if="remoteFrameUrl"
+            :src="remoteFrameUrl"
             class="camera-video remote-video"
-            autoplay
-            playsinline
-            muted
-          ></video>
+            alt="Imagen procesada del admin"
+          />
+          <div v-else class="video-placeholder">
+            Esperando a que el admin active la cámara.
+          </div>
         </div>
       </article>
     </section>
@@ -158,23 +137,19 @@ const props = defineProps({
 
 const emit = defineEmits(["pick-next-player"])
 
-const localVideo = ref(null);
-const remoteVideo = ref(null);
-
-const cameras = ref([]);
-const selectedCameraId = ref(null);
 const players = ref([]);
 const cameraError = ref("");
 const pickError = ref("");
 const pickPendingAlias = ref(null);
+const remoteFrameUrl = ref(null);
 const voiceError = ref("");
 const voiceListening = ref(false);
 const voiceLoading = ref(false);
 const voiceTranscript = ref("");
 const voiceResultAlias = ref(null);
 
-let pc = null;
-let localStream = null;
+let cameraSnapshotTimer = null;
+let cameraSnapshotPending = false;
 let playersPollTimer = null;
 let speechRecognition = null;
 
@@ -251,26 +226,6 @@ const voiceButtonText = computed(() => {
   if (voiceListening.value) return "Escuchando..."
   return "Decir color"
 })
-
-async function loadCameras() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    throw new Error("Camara no disponible en este navegador")
-  }
-
-  try {
-    const tempStream = await navigator.mediaDevices.getUserMedia({ video: true })
-    tempStream.getTracks().forEach((track) => track.stop())
-  } catch (err) {
-    throw new Error(getCameraAccessErrorMessage(err))
-  }
-
-  const devices = await navigator.mediaDevices.enumerateDevices()
-  cameras.value = devices.filter((device) => device.kind === "videoinput")
-
-  if (cameras.value.length && !selectedCameraId.value) {
-    selectedCameraId.value = cameras.value[0].deviceId
-  }
-}
 
 async function loadPlayers() {
   try {
@@ -437,133 +392,68 @@ async function submitVoiceColor(transcript) {
   }
 }
 
-async function startStream() {
-  cameraError.value = ""
-  cleanup()
+function startCameraSnapshotPolling() {
+  stopCameraSnapshotPolling()
+  console.log("[webRTC] Iniciando lectura de imagen compartida del admin")
+  refreshRemoteSnapshot()
+  cameraSnapshotTimer = window.setInterval(() => {
+    refreshRemoteSnapshot()
+  }, 250)
+}
+
+function stopCameraSnapshotPolling() {
+  if (cameraSnapshotTimer) {
+    window.clearInterval(cameraSnapshotTimer)
+  }
+  cameraSnapshotTimer = null
+  cameraSnapshotPending = false
+}
+
+function cleanupCameraView() {
+  stopCameraSnapshotPolling()
+  if (remoteFrameUrl.value) {
+    URL.revokeObjectURL(remoteFrameUrl.value)
+    remoteFrameUrl.value = null
+  }
+}
+
+async function refreshRemoteSnapshot() {
+  if (cameraSnapshotPending) {
+    return
+  }
+
+  cameraSnapshotPending = true
 
   try {
-    pc = new RTCPeerConnection(buildRtcConfiguration())
-
-    pc.oniceconnectionstatechange = () => {
-      console.log("ICE:", pc.iceConnectionState)
-    }
-
-    pc.ontrack = async (event) => {
-      const stream = event.streams?.[0] || new MediaStream([event.track])
-      if (remoteVideo.value) {
-        remoteVideo.value.srcObject = stream
-        await remoteVideo.value.play().catch(() => {})
-      }
-    }
-
-    localStream = await navigator.mediaDevices.getUserMedia({
-      video: selectedCameraId.value
-        ? {
-            deviceId: { exact: selectedCameraId.value },
-            width: { ideal: 640, max: 640 },
-            height: { ideal: 360, max: 360 },
-            aspectRatio: { ideal: 16 / 9 },
-            frameRate: { ideal: 18, max: 20 }
-          }
-        : {
-            width: { ideal: 640, max: 640 },
-            height: { ideal: 360, max: 360 },
-            aspectRatio: { ideal: 16 / 9 },
-            frameRate: { ideal: 18, max: 20 }
-          },
-      audio: false
-    })
-
-    if (localVideo.value) {
-      localVideo.value.srcObject = localStream
-    }
-
-    localStream.getTracks().forEach(track => {
-      if ("contentHint" in track) {
-        track.contentHint = "motion"
-      }
-      const sender = pc.addTrack(track, localStream)
-      applySenderQualityProfile(sender)
-    })
-
-    const offer = await pc.createOffer()
-    await pc.setLocalDescription(offer)
-
-    await waitForIceGathering(pc, 3000)
-
-    const response = await fetch(getWebRtcUrl("/offer"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sdp: pc.localDescription.sdp,
-        type: pc.localDescription.type
-      })
+    const response = await fetch(getWebRtcUrl("/snapshot"), {
+      method: "GET",
+      cache: "no-store"
     })
 
     if (!response.ok) {
-      throw new Error(`RTC HTTP ${response.status}`)
+      if (remoteFrameUrl.value) {
+        URL.revokeObjectURL(remoteFrameUrl.value)
+        remoteFrameUrl.value = null
+      }
+      cameraError.value = ""
+      return
     }
 
-    const answer = await response.json()
-    await pc.setRemoteDescription(answer)
-  } catch (err) {
-    cameraError.value = err?.message || "Error iniciando stream"
-    console.error("Error iniciando stream:", err)
-    cleanup()
-  }
-}
+    const blob = await response.blob()
+    const nextUrl = URL.createObjectURL(blob)
 
-// ===============================
-// Helpers
-// ===============================
-function cleanup() {
-  if (localStream) {
-    localStream.getTracks().forEach((track) => track.stop())
-    localStream = null
-  }
-
-  if (pc) {
-    pc.close()
-    pc = null
-  }
-
-  if (localVideo.value) {
-    localVideo.value.srcObject = null
-  }
-
-  if (remoteVideo.value) {
-    remoteVideo.value.srcObject = null
-  }
-}
-
-function applySenderQualityProfile(sender) {
-  if (!sender || typeof sender.getParameters !== "function" || typeof sender.setParameters !== "function") {
-    return;
-  }
-
-  try {
-    const params = sender.getParameters() || {};
-    if (!Array.isArray(params.encodings) || !params.encodings.length) {
-      params.encodings = [{}];
+    if (remoteFrameUrl.value) {
+      URL.revokeObjectURL(remoteFrameUrl.value)
     }
-    params.encodings[0] = {
-      ...params.encodings[0],
-      maxBitrate: 900000,
-      maxFramerate: 20,
-      degradationPreference: "maintain-framerate",
-      scaleResolutionDownBy: 1
-    };
-    sender.setParameters(params).catch?.(() => {});
-  } catch (err) {
-    console.warn("No se pudieron aplicar parametros RTC de calidad:", err);
-  }
-}
 
-function buildRtcConfiguration() {
-  const useStun = String(process.env.VUE_APP_WEBRTC_USE_STUN || "").trim().toLowerCase() === "true";
-  return useStun
-    ? { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }
-    : { iceServers: [] };
+    remoteFrameUrl.value = nextUrl
+    cameraError.value = ""
+  } catch (err) {
+    cameraError.value = err?.message || "No se pudo cargar la imagen del admin"
+    console.error("[webRTC] Error cargando imagen compartida:", err)
+  } finally {
+    cameraSnapshotPending = false
+  }
 }
 
 function getWebRtcBaseUrl() {
@@ -589,89 +479,17 @@ function getWebRtcUrl(path) {
   const normalizedPath = String(path || "").startsWith("/") ? path : `/${path}`
   return `${getWebRtcBaseUrl()}${normalizedPath}`
 }
-
-function getCameraAccessErrorMessage(error) {
-  const hostname = window.location.hostname
-  const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(hostname)
-
-  if (!window.isSecureContext && !isLocalhost) {
-    return "La camara solo funciona en HTTPS o localhost."
-  }
-
-  const name = error?.name || ""
-
-  if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-    return "Permiso de camara denegado."
-  }
-
-  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
-    return "No se encontro ninguna camara conectada."
-  }
-
-  if (name === "NotReadableError" || name === "TrackStartError") {
-    return "La camara esta ocupada por otra aplicacion."
-  }
-
-  if (name === "OverconstrainedError" || name === "ConstraintNotSatisfiedError") {
-    return "La camara no admite la configuracion solicitada."
-  }
-
-  if (name === "SecurityError") {
-    return "El navegador ha bloqueado el acceso a la camara."
-  }
-
-  return error?.message ? `No se pudo acceder a la camara: ${error.message}` : "No se pudo acceder a la camara."
-}
-
-function waitForIceGathering(pc, timeoutMs = 3000) {
-  return new Promise(resolve => {
-    if (pc.iceGatheringState === "complete") return resolve();
-    const timer = window.setTimeout(() => {
-      console.warn("ICE gathering no se completo a tiempo; se envia la oferta con los candidatos disponibles.")
-      cleanup();
-      resolve();
-    }, timeoutMs);
-    const cleanup = () => {
-      window.clearTimeout(timer);
-      pc.onicegatheringstatechange = null;
-    };
-
-    pc.onicegatheringstatechange = () => {
-      if (pc.iceGatheringState === "complete") {
-        cleanup();
-        resolve();
-      }
-    };
-  });
-}
-
-// ===============================
-// Lifecycle
-// ===============================
 onMounted(async () => {
   await loadPlayers()
   startPlayersPolling()
-
-  try {
-    await loadCameras()
-    if (selectedCameraId.value) {
-      await startStream()
-    }
-  } catch (err) {
-    cameraError.value = err?.message || "Error activando camara"
-  }
-
-  navigator.mediaDevices.ondevicechange = async () => {
-    console.log("Cambio de dispositivos detectado")
-    await loadCameras()
-  };
-});
+  startCameraSnapshotPolling()
+})
 
 onBeforeUnmount(() => {
-  stopPlayersPolling();
+  stopPlayersPolling()
   stopVoiceRecognition()
-  cleanup();
-});
+  cleanupCameraView()
+})
 
 watch(
   () => props.selectedNextPlayerAlias,
@@ -779,21 +597,9 @@ watch(
   font-size: 1rem;
 }
 
-.camera-select {
-  padding: 10px 14px;
-  font-size: 0.95rem;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(12, 17, 26, 0.9);
-  color: #f6f7fb;
-  min-width: 220px;
-  max-width: 100%;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
-}
-
 .video-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 22px;
   align-items: stretch;
 }
@@ -842,13 +648,25 @@ watch(
   background: #000;
 }
 
-.local-video {
-  transform: scaleX(-1);
+.remote-video {
+  image-rendering: auto;
 }
 
-.remote-video {
-  transform: scaleX(-1);
-  image-rendering: auto;
+.video-placeholder {
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+  text-align: center;
+  color: rgba(240, 244, 250, 0.68);
+  font-size: 0.95rem;
+  background:
+    radial-gradient(circle at top, rgba(125, 211, 252, 0.12), transparent 55%),
+    #05070d;
 }
 
 .turn-panel {
@@ -1015,18 +833,9 @@ watch(
 }
 
 @media (max-width: 980px) {
-  .video-grid {
-    grid-template-columns: 1fr;
-  }
-
   .webrtc-header {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .camera-select {
-    width: 100%;
-    min-width: 0;
   }
 }
 
