@@ -21,10 +21,17 @@
         <div class="video-frame remote-frame">
           <img
             v-if="remoteFrameUrl"
+            ref="remoteFrameImage"
             :src="remoteFrameUrl"
             class="camera-video remote-video"
             alt="Imagen procesada del admin"
+            @load="handleRemoteFrameLoad"
           />
+          <canvas
+            v-if="remoteFrameUrl"
+            ref="remoteFrameCanvas"
+            class="remote-overlay"
+          ></canvas>
           <div v-else class="video-placeholder">
             Esperando a que el admin active la cámara.
           </div>
@@ -42,13 +49,73 @@
       <p v-else-if="canPickNextPlayer" class="turn-note">
         Elige a qué color deberá ir el dron después de ti.
       </p>
+      <p v-else-if="isChallengeBlocking" class="turn-note">
+        Completa el reto del emoji para desbloquear el siguiente color.
+      </p>
       <p v-else class="turn-note">
         Ahora mismo decide {{ normalizedActivePlayerAlias || 'otro participante' }}.
       </p>
 
-      <p v-if="isCurrentPlayer && !canPickNextPlayer" class="turn-note">
+      <p v-if="isCurrentPlayer && !canPickNextPlayer && !isChallengeBlocking" class="turn-note">
         Cuando el dron termine el GOTO hasta tu posición, podrás decir el siguiente color.
       </p>
+
+      <article v-if="showChallengePanel" class="challenge-panel">
+        <div class="challenge-copy">
+          <p class="challenge-label">Reto de simulación</p>
+          <p v-if="challengeStage === 'countdown'" class="challenge-title">
+            Empieza en {{ challengeCountdown }}
+          </p>
+          <p v-else-if="challengeStage === 'active'" class="challenge-title">
+            Haz {{ challengePromptEmoji }} durante {{ challengeSecondsLeft }} s
+          </p>
+          <p v-else-if="challengeStage === 'success'" class="challenge-title">
+            Emoji correcto
+          </p>
+          <p v-else-if="challengeStage === 'shooting'" class="challenge-title">
+            Lanzando foto
+          </p>
+          <p v-else-if="challengeStage === 'failed'" class="challenge-title">
+            Tiempo agotado
+          </p>
+          <p v-else-if="challengeStage === 'error'" class="challenge-title">
+            Reto no disponible
+          </p>
+          <p class="challenge-text">
+            {{ challengeMessage }}
+          </p>
+          <div v-if="challengePromptEmoji" class="challenge-emoji">
+            {{ challengePromptEmoji }}
+          </div>
+          <p v-if="challengePromptText" class="challenge-text">
+            Emoji objetivo: {{ challengePromptText }}
+          </p>
+          <p v-if="challengeDetectedText" class="challenge-text">
+            Gesto detectado: {{ challengeDetectedText }}
+          </p>
+          <p v-if="challengeCameraHint" class="challenge-text">
+            {{ challengeCameraHint }}
+          </p>
+          <p v-if="challengeError" class="error challenge-error">{{ challengeError }}</p>
+        </div>
+
+        <div class="challenge-media">
+          <div class="challenge-status-card">
+            <p class="challenge-label">Fuente analizada</p>
+            <p class="challenge-text">
+              Se analiza la <strong>Vista del admin</strong> que ves arriba.
+            </p>
+            <p class="challenge-text">
+              Haz el gesto delante de esa cámara para que MediaPipe lo vea.
+            </p>
+          </div>
+
+          <div v-if="challengePhotoUrl" class="challenge-photo-wrap">
+            <p class="challenge-label">Foto automática</p>
+            <img :src="challengePhotoUrl" alt="Foto del reto" class="challenge-photo" />
+          </div>
+        </div>
+      </article>
 
       <p v-if="selectedNextPlayerAlias" class="turn-selected">
         Siguiente color elegido: {{ selectedNextPlayerName || selectedNextPlayerAlias }}
@@ -117,6 +184,10 @@ const props = defineProps({
     type: String,
     default: null
   },
+  simulationPlayers: {
+    type: Array,
+    default: () => []
+  },
   droneInAir: {
     type: Boolean,
     default: false
@@ -142,16 +213,54 @@ const cameraError = ref("");
 const pickError = ref("");
 const pickPendingAlias = ref(null);
 const remoteFrameUrl = ref(null);
+const remoteFrameImage = ref(null)
+const remoteFrameCanvas = ref(null)
 const voiceError = ref("");
 const voiceListening = ref(false);
 const voiceLoading = ref(false);
 const voiceTranscript = ref("");
 const voiceResultAlias = ref(null);
+const challengeStage = ref("idle")
+const challengeCountdown = ref(3)
+const challengeSecondsLeft = ref(10)
+const challengePromptType = ref("")
+const challengePromptEmoji = ref("")
+const challengePromptText = ref("")
+const challengeMessage = ref("")
+const challengeError = ref("")
+const challengePhotoUrl = ref(null)
+const challengeDetectedText = ref("")
+const challengeCameraHint = ref("")
 
 let cameraSnapshotTimer = null;
 let cameraSnapshotPending = false;
 let playersPollTimer = null;
 let speechRecognition = null;
+let challengeCountdownTimer = null
+let challengeWindowTimer = null
+let challengeHands = null
+let challengeDetectionPending = false
+let challengeStableMatches = 0
+let remoteHandLandmarks = null
+
+const handConnections = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16],
+  [13, 17], [17, 18], [18, 19], [19, 20],
+  [0, 17]
+]
+
+const challengePrompts = [
+  { type: "victory", emoji: "✌️", text: "V de victoria" },
+  { type: "point", emoji: "☝️", text: "Índice arriba" },
+  { type: "open", emoji: "🖐️", text: "Mano abierta" }
+]
+
+const hasSimulationPlayers = computed(() => {
+  return Array.isArray(props.simulationPlayers) && props.simulationPlayers.length > 0
+})
 
 const normalizedUserAlias = computed(() => {
   if (!props.userAlias) return null
@@ -177,10 +286,35 @@ const isCurrentPlayer = computed(() => {
   return !!normalizedUserAlias.value && normalizedUserAlias.value === normalizedActivePlayerAlias.value
 })
 
-const canPickNextPlayer = computed(() => {
+const baseCanPickNextPlayer = computed(() => {
   return !!props.droneInAir &&
     isCurrentPlayer.value &&
     normalizedGotoCompletedAlias.value === normalizedUserAlias.value
+})
+
+const challengeResolved = computed(() => {
+  return challengeStage.value === "success" ||
+    challengeStage.value === "failed" ||
+    challengeStage.value === "error"
+})
+
+const isChallengeTurn = computed(() => {
+  return hasSimulationPlayers.value &&
+    baseCanPickNextPlayer.value
+})
+
+const isChallengeBlocking = computed(() => {
+  return isChallengeTurn.value && !challengeResolved.value
+})
+
+const showChallengePanel = computed(() => {
+  return hasSimulationPlayers.value && (isChallengeTurn.value || challengeStage.value !== "idle")
+})
+
+const canPickNextPlayer = computed(() => {
+  if (!baseCanPickNextPlayer.value) return false
+  if (!hasSimulationPlayers.value) return true
+  return challengeResolved.value
 })
 
 const availablePlayers = computed(() => {
@@ -227,7 +361,585 @@ const voiceButtonText = computed(() => {
   return "Decir color"
 })
 
+function stopChallengeTimers() {
+  if (challengeCountdownTimer) {
+    window.clearInterval(challengeCountdownTimer)
+  }
+  if (challengeWindowTimer) {
+    window.clearInterval(challengeWindowTimer)
+  }
+  challengeCountdownTimer = null
+  challengeWindowTimer = null
+}
+
+function clearRemoteHandOverlay() {
+  try {
+    const canvas = remoteFrameCanvas.value
+    if (!canvas) return
+
+    const context = canvas.getContext("2d")
+    if (!context) return
+    context.clearRect(0, 0, canvas.width, canvas.height)
+  } catch (err) {
+    console.error("[webRTC] Error limpiando overlay de mano:", err)
+  }
+}
+
+function resizeRemoteHandOverlay() {
+  try {
+    const image = remoteFrameImage.value
+    const canvas = remoteFrameCanvas.value
+    if (!image || !canvas) return false
+
+    const width = Math.max(1, Math.round(image.clientWidth || image.width || 0))
+    const height = Math.max(1, Math.round(image.clientHeight || image.height || 0))
+    if (!width || !height) return false
+
+    if (canvas.width !== width) canvas.width = width
+    if (canvas.height !== height) canvas.height = height
+    return true
+  } catch (err) {
+    console.error("[webRTC] Error ajustando overlay de mano:", err)
+    return false
+  }
+}
+
+function drawRemoteHandOverlay() {
+  try {
+    const canvas = remoteFrameCanvas.value
+    if (!canvas) return
+
+    if (!resizeRemoteHandOverlay()) {
+      clearRemoteHandOverlay()
+      return
+    }
+
+    const context = canvas.getContext("2d")
+    if (!context) return
+
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    if (!Array.isArray(remoteHandLandmarks) || !remoteHandLandmarks.length) return
+
+    context.lineWidth = 3
+    context.strokeStyle = "#55f56a"
+    context.fillStyle = "#7dd3fc"
+
+    handConnections.forEach(([startIndex, endIndex]) => {
+      const startPoint = remoteHandLandmarks[startIndex]
+      const endPoint = remoteHandLandmarks[endIndex]
+      if (!startPoint || !endPoint) return
+
+      context.beginPath()
+      context.moveTo(startPoint.x * canvas.width, startPoint.y * canvas.height)
+      context.lineTo(endPoint.x * canvas.width, endPoint.y * canvas.height)
+      context.stroke()
+    })
+
+    remoteHandLandmarks.forEach((point, index) => {
+      const radius = index === 8 || index === 12 || index === 16 || index === 20 ? 6 : 4
+      context.beginPath()
+      context.arc(point.x * canvas.width, point.y * canvas.height, radius, 0, Math.PI * 2)
+      context.fill()
+    })
+  } catch (err) {
+    console.error("[webRTC] Error dibujando overlay de mano:", err)
+  }
+}
+
+function clearChallengePhoto() {
+  if (challengePhotoUrl.value) {
+    URL.revokeObjectURL(challengePhotoUrl.value)
+  }
+  challengePhotoUrl.value = null
+}
+
+function resetChallengeState() {
+  stopChallengeTimers()
+  challengeDetectionPending = false
+  challengeStableMatches = 0
+  remoteHandLandmarks = null
+  challengeStage.value = "idle"
+  challengeCountdown.value = 3
+  challengeSecondsLeft.value = 10
+  challengePromptType.value = ""
+  challengePromptEmoji.value = ""
+  challengePromptText.value = ""
+  challengeMessage.value = ""
+  challengeError.value = ""
+  challengeDetectedText.value = ""
+  challengeCameraHint.value = ""
+  clearChallengePhoto()
+  clearRemoteHandOverlay()
+}
+
+function selectChallengePrompt() {
+  const index = Math.floor(Math.random() * challengePrompts.length)
+  const selected = challengePrompts[index]
+  challengePromptType.value = selected.type
+  challengePromptEmoji.value = selected.emoji
+  challengePromptText.value = selected.text
+}
+
+function handleChallengeResults(results) {
+  try {
+    if (challengeStage.value !== "active") return
+
+    const landmarks = results?.multiHandLandmarks?.[0]
+    if (!landmarks) {
+      challengeStableMatches = 0
+      remoteHandLandmarks = null
+      challengeDetectedText.value = ""
+      challengeCameraHint.value = "No veo la mano en la vista del admin."
+      drawRemoteHandOverlay()
+      return
+    }
+
+    remoteHandLandmarks = landmarks
+    drawRemoteHandOverlay()
+
+    const detection = detectChallengeGesture(landmarks)
+    const detected = detection.gesture
+
+    challengeDetectedText.value = detected ? getChallengeGestureLabel(detected) : ""
+    challengeCameraHint.value = detection.hint
+
+    if (!detected || detected !== challengePromptType.value) {
+      challengeStableMatches = 0
+      return
+    }
+
+    challengeStableMatches += 1
+    if (challengeStableMatches < 3) return
+
+    handleChallengeSuccess()
+  } catch (err) {
+    console.error("[webRTC] Error procesando gesto:", err)
+  }
+}
+
+function getChallengeGestureLabel(type) {
+  if (type === "victory") return "V de victoria"
+  if (type === "point") return "Índice arriba"
+  if (type === "open") return "Mano abierta"
+  return ""
+}
+
+function getLandmarkDistance(pointA, pointB) {
+  if (!pointA || !pointB) return 0
+
+  const deltaX = Number(pointA.x || 0) - Number(pointB.x || 0)
+  const deltaY = Number(pointA.y || 0) - Number(pointB.y || 0)
+  return Math.hypot(deltaX, deltaY)
+}
+
+function getPalmCenter(wrist, indexMcp, middleMcp, ringMcp, pinkyMcp) {
+  try {
+    return {
+      x: (
+        Number(wrist?.x || 0) +
+        Number(indexMcp?.x || 0) +
+        Number(middleMcp?.x || 0) +
+        Number(ringMcp?.x || 0) +
+        Number(pinkyMcp?.x || 0)
+      ) / 5,
+      y: (
+        Number(wrist?.y || 0) +
+        Number(indexMcp?.y || 0) +
+        Number(middleMcp?.y || 0) +
+        Number(ringMcp?.y || 0) +
+        Number(pinkyMcp?.y || 0)
+      ) / 5
+    }
+  } catch (err) {
+    console.error("[webRTC] Error calculando centro de palma:", err)
+    return { x: 0, y: 0 }
+  }
+}
+
+function isFingerExtended(tip, pip, mcp, palmCenter) {
+  try {
+    const tipToPalm = getLandmarkDistance(tip, palmCenter)
+    const pipToPalm = getLandmarkDistance(pip, palmCenter)
+    const tipToMcp = getLandmarkDistance(tip, mcp)
+    const pipToMcp = getLandmarkDistance(pip, mcp)
+
+    return tipToPalm > pipToPalm * 1.22 &&
+      tipToMcp > pipToMcp * 1.55
+  } catch (err) {
+    console.error("[webRTC] Error comprobando dedo extendido:", err)
+    return false
+  }
+}
+
+function isFingerCurled(tip, pip, mcp, palmCenter, palmSize) {
+  try {
+    const tipToPalm = getLandmarkDistance(tip, palmCenter)
+    const pipToPalm = getLandmarkDistance(pip, palmCenter)
+    const tipToMcp = getLandmarkDistance(tip, mcp)
+    const pipToMcp = getLandmarkDistance(pip, mcp)
+
+    return tipToPalm < pipToPalm * 1.1 &&
+      tipToMcp < pipToMcp * 1.18 &&
+      tipToPalm < palmSize * 1.55
+  } catch (err) {
+    console.error("[webRTC] Error comprobando dedo curvado:", err)
+    return false
+  }
+}
+
+function detectChallengeGesture(landmarks) {
+  try {
+    const widthValues = landmarks.map((point) => Number(point?.x || 0))
+    const heightValues = landmarks.map((point) => Number(point?.y || 0))
+    const handWidth = Math.max(...widthValues) - Math.min(...widthValues)
+    const handHeight = Math.max(...heightValues) - Math.min(...heightValues)
+    const handCenterX = (Math.max(...widthValues) + Math.min(...widthValues)) / 2
+    const handCenterY = (Math.max(...heightValues) + Math.min(...heightValues)) / 2
+
+    if (handWidth > 0.62 || handHeight > 0.62) {
+      return {
+        gesture: "",
+        hint: "Aleja la mano un poco de la cámara del admin."
+      }
+    }
+
+    if (handWidth < 0.08 || handHeight < 0.08) {
+      return {
+        gesture: "",
+        hint: "Acerca la mano a la cámara del admin o hazla más grande en pantalla."
+      }
+    }
+
+    if (Math.abs(handCenterX - 0.5) > 0.28 || Math.abs(handCenterY - 0.5) > 0.28) {
+      return {
+        gesture: "",
+        hint: "Centra mejor la mano dentro de la vista del admin."
+      }
+    }
+
+    const wrist = landmarks[0]
+    const thumbTip = landmarks[4]
+    const thumbMcp = landmarks[2]
+    const indexMcp = landmarks[5]
+    const indexPip = landmarks[6]
+    const indexTip = landmarks[8]
+    const middleMcp = landmarks[9]
+    const middlePip = landmarks[10]
+    const middleTip = landmarks[12]
+    const ringMcp = landmarks[13]
+    const ringPip = landmarks[14]
+    const ringTip = landmarks[16]
+    const pinkyMcp = landmarks[17]
+    const pinkyPip = landmarks[18]
+    const pinkyTip = landmarks[20]
+    const palmCenter = getPalmCenter(wrist, indexMcp, middleMcp, ringMcp, pinkyMcp)
+
+    const palmSize = (
+      getLandmarkDistance(wrist, indexMcp) +
+      getLandmarkDistance(wrist, middleMcp) +
+      getLandmarkDistance(wrist, ringMcp) +
+      getLandmarkDistance(wrist, pinkyMcp)
+    ) / 4
+
+    if (palmSize < 0.04) {
+      return {
+        gesture: "",
+        hint: "La mano sale demasiado pequeña en la vista del admin."
+      }
+    }
+
+    const indexUp = isFingerExtended(indexTip, indexPip, indexMcp, palmCenter)
+    const middleUp = isFingerExtended(middleTip, middlePip, middleMcp, palmCenter)
+    const ringUp = isFingerExtended(ringTip, ringPip, ringMcp, palmCenter)
+    const pinkyUp = isFingerExtended(pinkyTip, pinkyPip, pinkyMcp, palmCenter)
+
+    const indexCurled = isFingerCurled(indexTip, indexPip, indexMcp, palmCenter, palmSize)
+    const middleCurled = isFingerCurled(middleTip, middlePip, middleMcp, palmCenter, palmSize)
+    const ringCurled = isFingerCurled(ringTip, ringPip, ringMcp, palmCenter, palmSize)
+    const pinkyCurled = isFingerCurled(pinkyTip, pinkyPip, pinkyMcp, palmCenter, palmSize)
+
+    const thumbCompact = getLandmarkDistance(thumbTip, palmCenter) < palmSize * 1.45 &&
+      getLandmarkDistance(thumbTip, thumbMcp) < palmSize * 1.2
+
+    const fingerSeparation = getLandmarkDistance(indexTip, middleTip)
+    const indexToPalm = getLandmarkDistance(indexTip, palmCenter)
+    const middleToPalm = getLandmarkDistance(middleTip, palmCenter)
+    const ringToPalm = getLandmarkDistance(ringTip, palmCenter)
+    const pinkyToPalm = getLandmarkDistance(pinkyTip, palmCenter)
+
+    if (indexUp && middleUp && ringUp && pinkyUp &&
+      indexToPalm > palmSize * 1.95 &&
+      middleToPalm > palmSize * 2 &&
+      ringToPalm > palmSize * 1.85 &&
+      pinkyToPalm > palmSize * 1.7) {
+      return {
+        gesture: "open",
+        hint: "Perfecto, mantén la mano así."
+      }
+    }
+
+    if (indexUp && middleUp && ringCurled && pinkyCurled &&
+      indexToPalm > palmSize * 1.9 &&
+      middleToPalm > palmSize * 1.95 &&
+      ringToPalm < palmSize * 1.5 &&
+      pinkyToPalm < palmSize * 1.45 &&
+      fingerSeparation > palmSize * 0.6) {
+      return {
+        gesture: "victory",
+        hint: "Perfecto, mantén la mano así."
+      }
+    }
+
+    if (indexUp && middleCurled && ringCurled && pinkyCurled &&
+      indexToPalm > palmSize * 1.95 &&
+      middleToPalm < palmSize * 1.55 &&
+      ringToPalm < palmSize * 1.5 &&
+      pinkyToPalm < palmSize * 1.45) {
+      return {
+        gesture: "point",
+        hint: "Perfecto, mantén la mano así."
+      }
+    }
+
+    if (indexCurled && middleCurled && ringCurled && pinkyCurled && thumbCompact) {
+      return {
+        gesture: "",
+        hint: "Abre un poco la mano. Cerrada del todo da muchos fallos."
+      }
+    }
+
+    return {
+      gesture: "",
+      hint: "No reconozco el gesto todavía en la vista del admin."
+    }
+  } catch (err) {
+    console.error("[webRTC] Error detectando gesto del reto:", err)
+    return {
+      gesture: "",
+      hint: "Error leyendo la mano."
+    }
+  }
+}
+
+async function ensureChallengeHands() {
+  try {
+    if (challengeHands) return
+
+    if (!window.Hands) {
+      throw new Error("MediaPipe Hands no está cargado")
+    }
+
+    challengeHands = new window.Hands({
+      locateFile(file) {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      }
+    })
+
+    challengeHands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 0,
+      minDetectionConfidence: 0.45,
+      minTrackingConfidence: 0.45
+    })
+
+    challengeHands.onResults(handleChallengeResults)
+    console.log("[webRTC] MediaPipe Hands listo para el reto")
+  } catch (err) {
+    console.error("[webRTC] Error preparando MediaPipe Hands:", err)
+    throw err
+  }
+}
+
+async function processChallengeFrame() {
+  try {
+    if (challengeStage.value !== "active") return
+    if (!challengeHands || !remoteFrameImage.value) return
+    if (!remoteFrameImage.value.complete) return
+    if (challengeDetectionPending) return
+
+    challengeDetectionPending = true
+    await challengeHands.send({
+      image: remoteFrameImage.value
+    })
+  } catch (err) {
+    console.error("[webRTC] Error enviando frame a MediaPipe:", err)
+  } finally {
+    challengeDetectionPending = false
+  }
+}
+
+function handleChallengeFailure() {
+  try {
+    if (challengeStage.value !== "active") return
+    stopChallengeTimers()
+    challengeStage.value = "failed"
+    challengeMessage.value = "No pasa nada. Ahora puedes mandar el dron al siguiente usuario."
+    challengeError.value = ""
+    console.log("[webRTC] Reto fallado por tiempo")
+  } catch (err) {
+    console.error("[webRTC] Error cerrando reto fallido:", err)
+  }
+}
+
+async function saveChallengePhotoState() {
+  try {
+    const response = await fetch("/api/estado-juego", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        foto_tomada_alias: normalizedUserAlias.value
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error("No se pudo guardar la foto del reto")
+    }
+  } catch (err) {
+    console.error("[webRTC] Error guardando estado de foto:", err)
+    throw err
+  }
+}
+
+async function handleChallengeSuccess() {
+  try {
+    if (challengeStage.value !== "active") return
+
+    stopChallengeTimers()
+    challengeStage.value = "shooting"
+    challengeMessage.value = "Emoji correcto. Lanzando foto automática..."
+    challengeError.value = ""
+    console.log("[webRTC] Reto superado, lanzando foto")
+
+    const response = await fetch("/api/foto", {
+      method: "POST",
+      cache: "no-store"
+    })
+
+    if (!response.ok) {
+      throw new Error("No se pudo lanzar la foto automática")
+    }
+
+    const blob = await response.blob()
+    clearChallengePhoto()
+    challengePhotoUrl.value = URL.createObjectURL(blob)
+    await saveChallengePhotoState()
+    challengeStage.value = "success"
+    challengeMessage.value = "Emoji correcto. Foto tomada. Ya puedes elegir el siguiente color."
+  } catch (err) {
+    challengeStage.value = "error"
+    challengeMessage.value = "El gesto ha sido correcto, pero la foto no se ha podido tomar."
+    challengeError.value = err?.message || "No se pudo completar la foto del reto"
+    console.error("[webRTC] Error en la foto automática del reto:", err)
+  }
+}
+
+function handleChallengeWindowTick() {
+  if (!isChallengeTurn.value) {
+    resetChallengeState()
+    return
+  }
+
+  if (challengeSecondsLeft.value <= 1) {
+    handleChallengeFailure()
+    return
+  }
+
+  challengeSecondsLeft.value -= 1
+}
+
+function startChallengeWindow() {
+  stopChallengeTimers()
+  challengeStableMatches = 0
+  challengeStage.value = "active"
+  challengeSecondsLeft.value = 10
+  challengeMessage.value = "Tienes 10 segundos para hacer el emoji correctamente."
+  challengeCameraHint.value = "Haz el gesto delante de la cámara del admin y procura que se vea la mano entera."
+  challengeWindowTimer = window.setInterval(() => {
+    handleChallengeWindowTick()
+  }, 1000)
+}
+
+function handleChallengeCountdownTick() {
+  if (!isChallengeTurn.value) {
+    resetChallengeState()
+    return
+  }
+
+  if (challengeCountdown.value <= 1) {
+    startChallengeWindow()
+    return
+  }
+
+  challengeCountdown.value -= 1
+}
+
+function startChallengeCountdown() {
+  stopChallengeTimers()
+  challengeStage.value = "countdown"
+  challengeCountdown.value = 3
+  challengeSecondsLeft.value = 10
+  challengeMessage.value = "Prepárate. El reto empieza en 3 segundos."
+  challengeCountdownTimer = window.setInterval(() => {
+    handleChallengeCountdownTick()
+  }, 1000)
+}
+
+async function startGestureChallenge() {
+  try {
+    if (!isChallengeTurn.value) return
+    if (!hasSimulationPlayers.value) return
+    if (challengeStage.value !== "idle") return
+
+    clearChallengePhoto()
+    challengeStableMatches = 0
+    challengeError.value = ""
+    challengeDetectedText.value = ""
+    challengeCameraHint.value = ""
+    selectChallengePrompt()
+    challengeStage.value = "countdown"
+    challengeMessage.value = "Preparando cámara y detección del reto..."
+    console.log("[webRTC] Iniciando reto de simulación para", normalizedUserAlias.value)
+
+    await ensureChallengeHands()
+
+    if (!isChallengeTurn.value) {
+      resetChallengeState()
+      return
+    }
+
+    startChallengeCountdown()
+  } catch (err) {
+    challengeStage.value = "error"
+    challengeMessage.value = "No se ha podido iniciar el reto, pero puedes seguir jugando."
+    challengeError.value = err?.message || "No se pudo preparar la detección del reto"
+    stopChallengeTimers()
+    console.error("[webRTC] Error iniciando reto:", err)
+  }
+}
+
+function handleRemoteFrameLoad() {
+  resizeRemoteHandOverlay()
+  drawRemoteHandOverlay()
+  if (challengeStage.value !== "active") return
+  processChallengeFrame()
+}
+
 async function loadPlayers() {
+  if (hasSimulationPlayers.value) {
+    players.value = props.simulationPlayers
+      .map((player) => {
+        const alias = String(player?.alias || "").trim().toUpperCase()
+        return {
+          alias,
+          lat: player?.lat,
+          lon: player?.lon,
+          ts: player?.ts || Date.now()
+        }
+      })
+      .filter((player) => !!player.alias)
+    return
+  }
+
   try {
     const response = await fetch("/api/jugadores", { cache: "no-store" })
     if (!response.ok) return
@@ -253,6 +965,10 @@ async function loadPlayers() {
 
 function startPlayersPolling() {
   stopPlayersPolling()
+  if (hasSimulationPlayers.value) {
+    loadPlayers()
+    return
+  }
   playersPollTimer = window.setInterval(() => {
     loadPlayers()
   }, 2000)
@@ -368,12 +1084,14 @@ async function submitVoiceColor(transcript) {
   voiceLoading.value = true
 
   try {
+    const availableAliases = availablePlayers.value.map((player) => player.alias)
     const response = await fetch("/api/voz-color", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         texto: transcript,
-        current_alias: normalizedUserAlias.value
+        current_alias: normalizedUserAlias.value,
+        available_aliases: availableAliases
       })
     })
 
@@ -415,6 +1133,8 @@ function cleanupCameraView() {
     URL.revokeObjectURL(remoteFrameUrl.value)
     remoteFrameUrl.value = null
   }
+  remoteHandLandmarks = null
+  clearRemoteHandOverlay()
 }
 
 async function refreshRemoteSnapshot() {
@@ -435,6 +1155,8 @@ async function refreshRemoteSnapshot() {
         URL.revokeObjectURL(remoteFrameUrl.value)
         remoteFrameUrl.value = null
       }
+      remoteHandLandmarks = null
+      clearRemoteHandOverlay()
       cameraError.value = ""
       return
     }
@@ -489,6 +1211,7 @@ onBeforeUnmount(() => {
   stopPlayersPolling()
   stopVoiceRecognition()
   cleanupCameraView()
+  resetChallengeState()
 })
 
 watch(
@@ -497,6 +1220,38 @@ watch(
     pickPendingAlias.value = null
     voiceLoading.value = false
   }
+)
+
+watch(
+  () => props.simulationPlayers,
+  () => {
+    if (!hasSimulationPlayers.value) return
+    loadPlayers()
+  },
+  { deep: true }
+)
+
+watch(
+  [
+    () => props.droneInAir,
+    () => normalizedActivePlayerAlias.value,
+    () => normalizedGotoCompletedAlias.value,
+    () => normalizedUserAlias.value
+  ],
+  () => {
+    if (!hasSimulationPlayers.value) {
+      resetChallengeState()
+      return
+    }
+
+    if (isChallengeTurn.value) {
+      startGestureChallenge()
+      return
+    }
+
+    resetChallengeState()
+  },
+  { immediate: true }
 )
 </script>
 
@@ -635,6 +1390,7 @@ watch(
 }
 
 .remote-frame {
+  position: relative;
   border-color: rgba(73, 200, 255, 0.4);
   box-shadow: inset 0 0 0 1px rgba(73, 200, 255, 0.08);
 }
@@ -650,6 +1406,15 @@ watch(
 .remote-video {
   transform: scaleX(-1);
   image-rendering: auto;
+}
+
+.remote-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  transform: scaleX(-1);
 }
 
 .video-placeholder {
@@ -707,6 +1472,84 @@ watch(
   flex-direction: column;
   gap: 10px;
   margin: 14px 0 16px;
+}
+
+.challenge-panel {
+  margin: 16px 0;
+  padding: 18px;
+  border-radius: 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  gap: 18px;
+  border: 1px solid rgba(125, 211, 252, 0.16);
+  background:
+    radial-gradient(circle at top left, rgba(22, 163, 74, 0.12), transparent 38%),
+    rgba(9, 13, 21, 0.82);
+}
+
+.challenge-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.challenge-label {
+  margin: 0;
+  font-family: 'Rajdhani', sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(125, 211, 252, 0.84);
+}
+
+.challenge-title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #eef1f6;
+}
+
+.challenge-text {
+  margin: 0;
+  color: rgba(240, 244, 250, 0.72);
+  font-size: 0.94rem;
+}
+
+.challenge-emoji {
+  font-size: clamp(3rem, 7vw, 4.4rem);
+  line-height: 1;
+}
+
+.challenge-media {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.challenge-status-card {
+  min-height: 220px;
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top, rgba(125, 211, 252, 0.1), transparent 55%),
+    #05070d;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+}
+
+.challenge-photo-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.challenge-photo {
+  width: 100%;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #000;
 }
 
 .voice-button {
@@ -832,10 +1675,18 @@ watch(
   margin-top: 0;
 }
 
+.challenge-error {
+  margin-top: 0;
+}
+
 @media (max-width: 980px) {
   .webrtc-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .challenge-panel {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -874,6 +1725,10 @@ watch(
 
   .voice-button {
     width: 100%;
+  }
+
+  .challenge-panel {
+    padding: 14px;
   }
 
   .turn-colors {

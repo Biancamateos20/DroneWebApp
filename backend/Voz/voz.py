@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from difflib import get_close_matches
 
 
 COLOR_NAME_BY_ALIAS = {
@@ -72,5 +73,24 @@ def resolve_spoken_color(text, allowed_aliases):
         for word in words:
             if word in normalized_synonyms:
                 return alias
+
+    fuzzy_candidates = {}
+    for alias, color_name in allowed:
+        synonyms = [color_name] + COLOR_SYNONYMS.get(color_name, [])
+        for synonym in synonyms:
+            normalized_synonym = normalize_voice_text(synonym)
+            if normalized_synonym:
+                fuzzy_candidates[normalized_synonym] = alias
+
+    if fuzzy_candidates:
+        exact_words = [word for word in words if word]
+        for word in exact_words:
+            matches = get_close_matches(word, list(fuzzy_candidates.keys()), n=1, cutoff=0.72)
+            if matches:
+                return fuzzy_candidates[matches[0]]
+
+        phrase_matches = get_close_matches(normalized_text, list(fuzzy_candidates.keys()), n=1, cutoff=0.72)
+        if phrase_matches:
+            return fuzzy_candidates[phrase_matches[0]]
 
     return None

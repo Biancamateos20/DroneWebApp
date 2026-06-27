@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, Response
 import requests
 from flask_cors import CORS
 import os
-from Voz.voz import get_color_name_from_alias, resolve_spoken_color
+from Voz.voz import COLOR_NAME_BY_ALIAS, get_color_name_from_alias, resolve_spoken_color
 
 #https://github.com/dronsEETAC/WebAppFlask/blob/main/WebAppHTTP/app/dron_controls.py
 
@@ -492,46 +492,72 @@ def estado_juego():
 def voz_color():
     global siguiente_jugador_alias, goto_completado_alias, voz_objetivo_alias, voz_comando_id
 
-    data = request.get_json() or {}
-    texto = str(data.get("texto") or "").strip()
-    current_alias = str(data.get("current_alias") or "").strip().upper()
+    try:
+        data = request.get_json() or {}
+        texto = str(data.get("texto") or "").strip()
+        current_alias = str(data.get("current_alias") or "").strip().upper()
+        raw_available_aliases = data.get("available_aliases") or []
 
-    if not texto:
-        return jsonify({"ok": False, "error": "Falta texto reconocido"}), 400
+        print(f"[voz-color] Texto recibido: {texto}")
+        print(f"[voz-color] Alias actual: {current_alias}")
 
-    if not current_alias:
-        return jsonify({"ok": False, "error": "Falta alias actual"}), 400
+        if not texto:
+            return jsonify({"ok": False, "error": "Falta texto reconocido"}), 400
 
-    if jugador_actual_alias != current_alias:
-        return jsonify({"ok": False, "error": "Ahora mismo no te toca enviar el dron"}), 409
+        if not current_alias:
+            return jsonify({"ok": False, "error": "Falta alias actual"}), 400
 
-    if goto_completado_alias != current_alias:
-        return jsonify({"ok": False, "error": "Primero tiene que terminar el GOTO del jugador actual"}), 409
+        if jugador_actual_alias != current_alias:
+            return jsonify({"ok": False, "error": "Ahora mismo no te toca enviar el dron"}), 409
 
-    aliases_disponibles = []
-    for jugador in jugadores:
-        alias = str(jugador.get("alias") or "").strip().upper()
-        if alias and alias != current_alias:
-            aliases_disponibles.append(alias)
+        if goto_completado_alias != current_alias:
+            return jsonify({"ok": False, "error": "Primero tiene que terminar el GOTO del jugador actual"}), 409
 
-    aliases_disponibles = list(dict.fromkeys(aliases_disponibles))
-    alias_resuelto = resolve_spoken_color(texto, aliases_disponibles)
+        aliases_disponibles = []
 
-    if alias_resuelto is None:
-        return jsonify({"ok": False, "error": "No se ha reconocido un color registrado"}), 404
+        if isinstance(raw_available_aliases, list):
+            for alias in raw_available_aliases:
+                normalized_alias = str(alias or "").strip().upper()
+                if normalized_alias and normalized_alias != current_alias:
+                    aliases_disponibles.append(normalized_alias)
 
-    siguiente_jugador_alias = alias_resuelto
-    goto_completado_alias = None
-    voz_objetivo_alias = alias_resuelto
-    voz_comando_id += 1
+        if not aliases_disponibles:
+            for jugador in jugadores:
+                alias = str(jugador.get("alias") or "").strip().upper()
+                if alias and alias != current_alias:
+                    aliases_disponibles.append(alias)
 
-    return jsonify({
-        "ok": True,
-        "texto": texto,
-        "alias": alias_resuelto,
-        "color_name": get_color_name_from_alias(alias_resuelto),
-        "voz_comando_id": voz_comando_id
-    }), 200
+        aliases_disponibles = list(dict.fromkeys(aliases_disponibles))
+        print(f"[voz-color] Aliases disponibles: {aliases_disponibles}")
+
+        alias_resuelto = resolve_spoken_color(texto, aliases_disponibles)
+        print(f"[voz-color] Alias resuelto: {alias_resuelto}")
+
+        if alias_resuelto is None:
+            alias_detectado = resolve_spoken_color(texto, list(COLOR_NAME_BY_ALIAS.keys()))
+            if alias_detectado is not None:
+                return jsonify({
+                    "ok": False,
+                    "error": f"Se ha reconocido {get_color_name_from_alias(alias_detectado).lower()}, pero ese color no está registrado ahora mismo"
+                }), 409
+
+            return jsonify({"ok": False, "error": "No se ha reconocido un color registrado"}), 404
+
+        siguiente_jugador_alias = alias_resuelto
+        goto_completado_alias = None
+        voz_objetivo_alias = alias_resuelto
+        voz_comando_id += 1
+
+        return jsonify({
+            "ok": True,
+            "texto": texto,
+            "alias": alias_resuelto,
+            "color_name": get_color_name_from_alias(alias_resuelto),
+            "voz_comando_id": voz_comando_id
+        }), 200
+    except Exception as e:
+        print(f"[voz-color] Error resolviendo color por voz: {e}")
+        return jsonify({"ok": False, "error": "Error procesando el color por voz"}), 500
 
 @app.route("/connection", methods=["POST"])
 def connection():

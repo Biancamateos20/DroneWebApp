@@ -1,7 +1,7 @@
 <template>
   <div class="admin-container" :class="{ 'camera-on': cameraActive }">
     <h1 class="title">Panel de Control</h1>
-    <p class="subtitle">Administrador de la partida</p>
+    <p class="subtitle">Administrador de la partida · {{ isSimulationMode ? 'Simulacion' : 'Real' }}</p>
 
     <div id="map" class="map"></div>
 
@@ -18,6 +18,14 @@
           <button class="btn stop" @click="pararJuego">
             ■ Parar juego
           </button>
+
+          <button
+            v-if="isSimulationMode"
+            class="btn info"
+            @click="openSimulationRoom"
+          >
+            🖥 Abrir 4 pantallas
+          </button>
         </div>
       </section>
 
@@ -28,7 +36,7 @@
         <div class="row">
           <label class="field">
             <span>Modo</span>
-            <select v-model="droneMode">
+            <select v-model="droneMode" :disabled="isSimulationMode">
               <option value="Simulacion">Simulación</option>
               <option value="Real">Real</option>
             </select>
@@ -45,6 +53,9 @@
             </div>
           </div>
         </div>
+        <p v-if="isSimulationMode" class="mini-note">
+          El modo del dron esta fijado en simulacion desde la pantalla previa del administrador.
+        </p>
         <p v-if="telemetryAltDisplay !== null" class="mini-note">
           Altitud telemetría: {{ telemetryAltDisplay.toFixed(3) }} m
           <span v-if="telemetryAltitudeTrendText">· {{ telemetryAltitudeTrendText }}</span>
@@ -175,7 +186,7 @@
               <span class="lab-step">Paso 3</span>
               <div class="lab-title">Objetivo</div>
             </div>
-            <p class="mini-note">Cuando el dron ya esté volando, podrás mandarlo al admin o al jugador elegido.</p>
+            <p class="mini-note">Cuando el dron ya esté volando, podrás mandarlo al jugador elegido.</p>
 
             <label class="mini-field">
               <span>Parada antes del geofence (m)</span>
@@ -189,7 +200,7 @@
               />
             </label>
             <p v-if="canApplyGeofenceStopDistance" class="mini-note">
-              El mapa marca en vivo la parada prevista antes del geofence para el admin y el jugador seleccionado.
+              El mapa marca en vivo la parada prevista antes del geofence para el jugador seleccionado.
             </p>
             <p class="mini-note">{{ gotoStatus }}</p>
             <p v-if="activePlayerAlias" class="mini-note">
@@ -236,13 +247,10 @@
           </div>
         </div>
 
-        <div class="gps-box" v-if="gpsAccuracy != null || adminPos">
+        <div class="gps-box" v-if="gpsAccuracy != null">
           <div>
             Precisión actual: <strong>{{ gpsAccuracy }} m</strong>
             <span v-if="gpsTimestamp">· {{ gpsTimestamp }}</span>
-          </div>
-          <div v-if="adminPos" class="gps-coords">
-            Admin: {{ adminPos.lat.toFixed(6) }}, {{ adminPos.lon.toFixed(6) }}
           </div>
         </div>
       </section>
@@ -345,6 +353,16 @@ import { LiveWS } from '../services/liveWS'
 
 export default {
   name: 'IniciarJuego',
+  props: {
+    adminMode: {
+      type: String,
+      default: 'real'
+    },
+    simulationConfig: {
+      type: Object,
+      default: null
+    }
+  },
 
   data() {
     return {
@@ -434,10 +452,6 @@ export default {
       gpsTimestamp: null,
       gpsLoading: false,
       gpsError: null,
-      adminPos: null,
-      adminMarker: null,
-      adminAcc: null,
-      adminCentered: false,
 
       geofenceMode: false,
       geofencePoints: [],
@@ -667,12 +681,18 @@ export default {
       const value = Number(this.gotoSpeed)
       if (!Number.isFinite(value)) return 1.0
       return Math.min(20, Math.max(0.1, value))
+    },
+    isSimulationMode() {
+      return String(this.adminMode || '').trim().toLowerCase() === 'simulacion'
     }
   },
 
   watch: {
     mapReady() {
       this.refreshAllStopPreviews()
+      if (this.isSimulationMode) {
+        this.applySimulationSetup()
+      }
     },
     geofenceStopDistance() {
       this.refreshAllStopPreviews()
@@ -700,7 +720,6 @@ export default {
       this.gotoCompletedAlias = null
       this.photoTakenAlias = null
       this.pendingVoiceTargetAlias = null
-      this.selectedPlayerAlias = null
       this.gotoTargetAlias = null
       this.gotoTargetLat = null
       this.gotoTargetLon = null
@@ -712,12 +731,6 @@ export default {
         foto_tomada_alias: null,
         voz_objetivo_alias: null
       })
-    },
-    adminPos: {
-      handler() {
-        this.refreshAllStopPreviews()
-      },
-      deep: true
     },
     selectedPlayerAlias() {
       this.refreshAllStopPreviews()
@@ -731,6 +744,14 @@ export default {
   },
 
   mounted() {
+    if (this.isSimulationMode) {
+      this.droneMode = 'Simulacion'
+      this.logEvent('info', 'Panel de control abierto en modo simulacion')
+    } else {
+      this.droneMode = 'Real'
+      this.logEvent('info', 'Panel de control abierto en modo real')
+    }
+
     this.initMap()
     this.initWS()
     this.startPollingFallback()
@@ -770,9 +791,145 @@ export default {
   },
 
   methods: {
+    logEvent(level, message, extra = null) {
+      const entry = {
+        ts: new Date().toISOString(),
+        scope: 'IniciarJuego',
+        level,
+        message,
+        extra
+      }
+
+      try {
+        const raw = localStorage.getItem('dronewebapp_logs')
+        const logs = raw ? JSON.parse(raw) : []
+        logs.push(entry)
+        localStorage.setItem('dronewebapp_logs', JSON.stringify(logs.slice(-400)))
+      } catch (e) {
+        console.warn('[IniciarJuego] No se pudo guardar el log en localStorage:', e)
+      }
+
+      if (level === 'error') {
+        console.error('[IniciarJuego]', message, extra || '')
+        return
+      }
+
+      if (level === 'warn') {
+        console.warn('[IniciarJuego]', message, extra || '')
+        return
+      }
+
+      console.log('[IniciarJuego]', message, extra || '')
+    },
+
     setCameraZoom(mode) {
       this.cameraZoom = mode
     },
+
+    getSimulationPlayersSnapshot() {
+      try {
+        const rawPlayers = Array.isArray(this.simulationConfig?.players)
+          ? this.simulationConfig.players
+          : []
+        const now = Date.now()
+
+        return rawPlayers
+          .map((player) => {
+            const alias = String(player?.alias || '').trim().toUpperCase()
+            const lat = Number(player?.lat)
+            const lon = Number(player?.lon)
+            const precision = Number(player?.precision)
+
+            if (!alias || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+              return null
+            }
+
+            return {
+              alias,
+              lat,
+              lon,
+              precision: Number.isFinite(precision) ? precision : 1,
+              ts: now
+            }
+          })
+          .filter((player) => !!player)
+      } catch (e) {
+        this.logEvent('error', 'Error construyendo los jugadores de simulacion', {
+          error: e?.message || String(e)
+        })
+        return []
+      }
+    },
+
+    applySimulationPlayers() {
+      try {
+        if (!this.isSimulationMode) return
+
+        const players = this.getSimulationPlayersSnapshot()
+        this.occupiedPlayerAliases = players.map((player) => player.alias)
+        this.applyPlayersSnapshot(players)
+
+        if (!this.selectedPlayerAlias && this.occupiedPlayerAliases.length) {
+          this.selectedPlayerAlias = [...this.occupiedPlayerAliases]
+            .sort((a, b) => a.localeCompare(b))[0]
+        }
+
+        this.logEvent('info', 'Jugadores simulados cargados en el panel', {
+          total: players.length
+        })
+      } catch (e) {
+        this.logEvent('error', 'Error aplicando los jugadores simulados', {
+          error: e?.message || String(e)
+        })
+      }
+    },
+
+    applySimulationSetup() {
+      try {
+        if (!this.isSimulationMode) return
+        this.droneMode = 'Simulacion'
+        this.applySimulationPlayers()
+      } catch (e) {
+        this.logEvent('error', 'Error aplicando el setup de simulacion', {
+          error: e?.message || String(e)
+        })
+      }
+    },
+
+    openSimulationRoom() {
+      try {
+        const players = Array.isArray(this.simulationConfig?.players)
+          ? this.simulationConfig.players
+          : []
+
+        if (!players.length) {
+          this.error = 'No hay jugadores simulados configurados para abrir las 4 pantallas'
+          return
+        }
+
+        localStorage.setItem('simulation_setup_v1', JSON.stringify(this.simulationConfig || null))
+
+        const url = new URL(window.location.href)
+        url.search = ''
+        url.searchParams.set('simulation-room', '1')
+
+        const popup = window.open(url.toString(), '_blank')
+        if (!popup) {
+          this.error = 'El navegador ha bloqueado la ventana de simulacion'
+          return
+        }
+
+        this.logEvent('info', 'Ventana de 4 pantallas de simulacion abierta', {
+          total: players.length
+        })
+      } catch (e) {
+        this.error = 'No se pudo abrir la ventana de simulacion'
+        this.logEvent('error', 'Error abriendo la ventana de 4 pantallas de simulacion', {
+          error: e?.message || String(e)
+        })
+      }
+    },
+
     getWebRtcBaseUrl() {
       let configured = String(process.env.VUE_APP_WEBRTC_TARGET || '').trim().replace(/\/$/, '')
 
@@ -1342,6 +1499,9 @@ export default {
 
         if (msg.type === 'reset') {
           this.clearMarkers()
+          if (this.isSimulationMode) {
+            this.applySimulationSetup()
+          }
         }
       }
 
@@ -1360,8 +1520,8 @@ export default {
       const container = L.DomUtil.get('map')
       if (container) container._leaflet_id = null
 
-      const fallbackLat = 41.2766
-      const fallbackLon = 1.9890
+      const fallbackLat = 41.276425991728814
+      const fallbackLon = 1.9886158678586885
 
       const start = (lat, lon) => {
         this.map = L.map('map', { maxZoom: 20 }).setView([lat, lon], 18)
@@ -1408,13 +1568,7 @@ export default {
         }
       }
 
-      if (!navigator.geolocation) return start(fallbackLat, fallbackLon)
-
-      navigator.geolocation.getCurrentPosition(
-        (pos) => start(pos.coords.latitude, pos.coords.longitude),
-        () => start(fallbackLat, fallbackLon),
-        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
-      )
+      start(fallbackLat, fallbackLon)
     },
 
     syncGeofenceMapClickBinding() {
@@ -1549,15 +1703,7 @@ export default {
       this.geofenceMask = null
     },
 
-    getStopPreviewStyle(kind) {
-      if (kind === 'admin') {
-        return {
-          color: '#38bdf8',
-          blockedColor: '#7dd3fc',
-          tooltip: 'Parada admin'
-        }
-      }
-
+    getStopPreviewStyle() {
       return {
         color: '#f59e0b',
         blockedColor: '#fdba74',
@@ -1571,7 +1717,7 @@ export default {
       if (!this.map) return null
       if (this.stopPreviewLayers[kind]) return this.stopPreviewLayers[kind]
 
-      const style = this.getStopPreviewStyle(kind)
+      const style = this.getStopPreviewStyle()
       const routeLine = L.polyline([], {
         color: style.color,
         weight: 3,
@@ -1628,7 +1774,6 @@ export default {
 
       this.stopPreviewRefreshFrame = window.requestAnimationFrame(() => {
         this.stopPreviewRefreshFrame = null
-        this.refreshStopPreview('admin')
         this.refreshStopPreview('player')
       })
     },
@@ -1639,9 +1784,7 @@ export default {
         return
       }
 
-      const target = kind === 'admin'
-        ? this.adminPos
-        : this.selectedPlayer
+      const target = this.selectedPlayer
 
       const droneLat = Number(this.dronePos?.lat)
       const droneLon = Number(this.dronePos?.lon)
@@ -1667,7 +1810,7 @@ export default {
       const layers = this.ensureStopPreviewLayers(kind)
       if (!layers) return
 
-      const style = this.getStopPreviewStyle(kind)
+      const style = this.getStopPreviewStyle()
       const stopLatLng = [resolved.lat, resolved.lon]
       const targetLatLng = [targetLat, targetLon]
       const tooltip = `${style.tooltip} · ${resolved.appliedBackoffMeters.toFixed(1)} m antes`
@@ -2616,24 +2759,21 @@ export default {
     },
 
     clearAdminLocation() {
-      this.clearStopPreview('admin')
-      if (this.adminMarker) {
-        try { this.adminMarker.remove() } catch (e) { console.warn("Error", e) }
-      }
-      if (this.adminAcc) {
-        try { this.adminAcc.remove() } catch (e) { console.warn("Error", e) }
-      }
-      this.adminMarker = null
-      this.adminAcc = null
-      this.adminPos = null
       this.gpsAccuracy = null
       this.gpsTimestamp = null
-      this.adminCentered = false
     },
 
     startPollingFallback() {
       this.stopPollingFallback()
       this.refreshSharedGameState()
+      if (this.isSimulationMode) {
+        this.applySimulationSetup()
+        this.pollTimer = setInterval(async () => {
+          await this.refreshSharedGameState()
+        }, 600)
+        return
+      }
+
       this.refreshOccupiedPlayerAliases()
       this.pollTimer = setInterval(async () => {
         await this.refreshSharedGameState()
@@ -2672,6 +2812,11 @@ export default {
     },
 
     async refreshOccupiedPlayerAliases() {
+      if (this.isSimulationMode) {
+        this.applySimulationPlayers()
+        return
+      }
+
       try {
         const res = await fetch('/api/colores', { cache: 'no-store' })
         if (!res.ok) return
@@ -2751,7 +2896,7 @@ export default {
 
       if (this.nextPlayerAlias) {
         this.selectedPlayerAlias = this.nextPlayerAlias
-      } else if (!this.droneInAir && !this.activePlayerAlias) {
+      } else if (!this.droneInAir && !this.activePlayerAlias && !this.isSimulationMode) {
         this.selectedPlayerAlias = null
       }
 
@@ -2795,6 +2940,12 @@ export default {
         this.live.reset()
         this.clearMarkers()
         this.clearAdminLocation()
+        if (this.isSimulationMode) {
+          this.applySimulationSetup()
+        }
+        this.logEvent('info', 'Partida parada desde el panel', {
+          simulation: this.isSimulationMode
+        })
       } catch {
         this.error = 'Error al parar el juego'
       }
@@ -2901,6 +3052,13 @@ export default {
     checkGpsPrecision() {
       this.gpsError = null
       this.gpsLoading = true
+      if (this.isSimulationMode) {
+        this.gpsAccuracy = null
+        this.gpsTimestamp = 'Simulacion'
+        this.gpsLoading = false
+        return
+      }
+
       if (!navigator.geolocation) {
         this.gpsError = 'Geolocalización no disponible en este navegador'
         this.gpsLoading = false
@@ -2909,12 +3067,10 @@ export default {
 
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const { latitude, longitude, accuracy } = pos.coords
+          const { accuracy } = pos.coords
           const acc = Number(accuracy)
           this.gpsAccuracy = Number.isFinite(acc) ? Math.round(acc) : null
           this.gpsTimestamp = new Date(pos.timestamp).toLocaleTimeString()
-          this.adminPos = { lat: Number(latitude), lon: Number(longitude) }
-          this.updateAdminLocation(latitude, longitude, acc)
           this.gpsLoading = false
         },
         (err) => {
@@ -2923,43 +3079,6 @@ export default {
         },
         { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
       )
-    },
-
-    ensureAdminLayers(latlng, accuracy) {
-      if (!this.mapReady || !this.map) return
-      if (!this.adminMarker) {
-        this.adminMarker = L.circleMarker(latlng, {
-          radius: 7,
-          weight: 2,
-          color: '#00e5ff',
-          fillColor: '#00e5ff',
-          fillOpacity: 0.9
-        }).addTo(this.map).bindPopup('Administrador')
-      }
-      if (!this.adminAcc) {
-        this.adminAcc = L.circle(latlng, {
-          radius: accuracy && accuracy > 0 ? accuracy : 5,
-          weight: 1,
-          color: '#00e5ff',
-          fillColor: '#00e5ff',
-          fillOpacity: 0.08
-        }).addTo(this.map)
-      }
-    },
-
-    updateAdminLocation(lat, lon, accuracy) {
-      if (!this.mapReady || !this.map) return
-      const latlng = [Number(lat), Number(lon)]
-      this.ensureAdminLayers(latlng, accuracy)
-      if (this.adminMarker) this.adminMarker.setLatLng(latlng)
-      if (this.adminAcc) this.adminAcc.setLatLng(latlng)
-      if (this.adminAcc && Number.isFinite(accuracy) && accuracy > 0) {
-        this.adminAcc.setRadius(accuracy)
-      }
-      if (!this.adminCentered) {
-        this.map.setView(latlng, 18)
-        this.adminCentered = true
-      }
     },
 
     async toggleCamera() {

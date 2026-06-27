@@ -11,11 +11,27 @@
       :alias="userAlias"
     />
 
-    <IniciarJuego v-else-if="screen === 'admin'" />
+    <AdminSetupView
+      v-else-if="screen === 'admin-setup'"
+      @cancel-admin="handleAdminSetupCancel"
+      @start-admin="handleAdminSetupStart"
+    />
+
+    <IniciarJuego
+      v-else-if="screen === 'admin'"
+      :admin-mode="adminMode"
+      :simulation-config="adminSimulationConfig"
+    />
+
+    <SimulationPlayersView
+      v-else-if="screen === 'simulation-room'"
+      :players="simulationPlayersForView"
+    />
 
     <WebRTC
       v-else-if="screen === 'webrtc'"
       :user-alias="userAlias"
+      :simulation-players="simulationPlayersForView"
       :drone-in-air="droneInAir"
       :active-player-alias="activePlayerAlias"
       :selected-next-player-alias="selectedNextPlayerAlias"
@@ -28,18 +44,23 @@
 <script>
 import LoginView from './components/LoginView.vue'
 import SalaDeEspera from './components/SalaDeEspera.vue'
+import AdminSetupView from './components/AdminSetupView.vue'
 import IniciarJuego from './components/IniciarJuego.vue'
+import SimulationPlayersView from './components/SimulationPlayersView.vue'
 import WebRTC from './components/webRTC.vue'
 import { LiveWS } from './services/liveWS'
 
 export default {
   name: 'App',
-  components: { LoginView, SalaDeEspera, IniciarJuego, WebRTC },
+  components: { LoginView, SalaDeEspera, AdminSetupView, IniciarJuego, SimulationPlayersView, WebRTC },
 
   data() {
     return {
       screen: 'login',
       userAlias: null,
+      adminMode: 'real',
+      adminSimulationConfig: null,
+      simulationWindowType: null,
 
       live: null,
       watchId: null,
@@ -64,8 +85,37 @@ export default {
     }
   },
 
+  computed: {
+    simulationPlayersForView() {
+      const players = Array.isArray(this.adminSimulationConfig?.players)
+        ? this.adminSimulationConfig.players
+        : []
+
+      return players
+        .map((player) => {
+          const alias = String(player?.alias || '').trim().toUpperCase()
+          const lat = Number(player?.lat)
+          const lon = Number(player?.lon)
+          const precision = Number(player?.precision)
+          if (!alias || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+            return null
+          }
+
+          return {
+            alias,
+            lat,
+            lon,
+            precision: Number.isFinite(precision) ? precision : 1,
+            ts: Date.now()
+          }
+        })
+        .filter((player) => !!player)
+    }
+  },
+
   created() {
     this.live = new LiveWS()
+    this.bootstrapSimulationWindow()
 
     this.live.onMessage = (msg) => {
       if (!msg) return
@@ -99,6 +149,7 @@ export default {
 
   beforeUnmount() {
     this.stopLiveLocation()
+    this.stopGamePolling()
     this.live?.disconnect()
     if (this.visibilityHandler) {
       document.removeEventListener('visibilitychange', this.visibilityHandler)
@@ -107,6 +158,37 @@ export default {
   },
 
   methods: {
+    logEvent(level, message, extra = null) {
+      const entry = {
+        ts: new Date().toISOString(),
+        scope: 'App',
+        level,
+        message,
+        extra
+      }
+
+      try {
+        const raw = localStorage.getItem('dronewebapp_logs')
+        const logs = raw ? JSON.parse(raw) : []
+        logs.push(entry)
+        localStorage.setItem('dronewebapp_logs', JSON.stringify(logs.slice(-400)))
+      } catch (e) {
+        console.warn('[App] No se pudo guardar el log en localStorage:', e)
+      }
+
+      if (level === 'error') {
+        console.error('[App]', message, extra || '')
+        return
+      }
+
+      if (level === 'warn') {
+        console.warn('[App]', message, extra || '')
+        return
+      }
+
+      console.log('[App]', message, extra || '')
+    },
+
     async handleLoginSuccess(data) {
       this.userAlias = data.color
       this.screen = 'waiting'
@@ -173,13 +255,141 @@ export default {
     },
 
     handleAdminLogin() {
-      this.screen = 'admin'
+      if (this.simulationWindowType) return
+      this.screen = 'admin-setup'
       this.stopLiveLocation()
       this.stopGamePolling()
       this.userAlias = null
+      this.adminMode = 'real'
+      this.adminSimulationConfig = null
+      this.logEvent('info', 'Acceso de administrador concedido, abriendo setup previo')
 
       // WS admin
       this.live.connect({ role: 'admin' })
+    },
+
+    handleAdminSetupCancel() {
+      try {
+        this.screen = 'login'
+        this.adminMode = 'real'
+        this.adminSimulationConfig = null
+        this.clearSimulationConfigStorage()
+        this.live?.disconnect()
+        this.logEvent('info', 'Setup de admin cancelado, vuelta a login')
+      } catch (e) {
+        this.logEvent('error', 'Error cancelando el setup de admin', {
+          error: e?.message || String(e)
+        })
+      }
+    },
+
+    handleAdminSetupStart(payload) {
+      try {
+        const mode = String(payload?.mode || 'real').trim().toLowerCase()
+        this.adminMode = mode === 'simulacion' ? 'simulacion' : 'real'
+        this.adminSimulationConfig = this.adminMode === 'simulacion'
+          ? (payload?.simulationConfig || null)
+          : null
+        if (this.adminMode === 'simulacion') {
+          this.saveSimulationConfigStorage(this.adminSimulationConfig)
+        } else {
+          this.clearSimulationConfigStorage()
+        }
+        this.screen = 'admin'
+        this.logEvent('info', 'Entrada al panel de administrador', {
+          mode: this.adminMode,
+          simulationPlayers: this.adminSimulationConfig?.players?.length || 0
+        })
+      } catch (e) {
+        this.logEvent('error', 'Error procesando el setup del admin', {
+          error: e?.message || String(e)
+        })
+      }
+    },
+
+    getQueryParams() {
+      try {
+        return new URLSearchParams(window.location.search || '')
+      } catch (e) {
+        this.logEvent('warn', 'No se pudieron leer los query params', {
+          error: e?.message || String(e)
+        })
+        return new URLSearchParams()
+      }
+    },
+
+    loadSimulationConfigStorage() {
+      try {
+        const raw = localStorage.getItem('simulation_setup_v1')
+        if (!raw) return null
+        const parsed = JSON.parse(raw)
+        if (!parsed || !Array.isArray(parsed.players)) return null
+        return parsed
+      } catch (e) {
+        this.logEvent('error', 'Error leyendo la configuracion guardada de simulacion', {
+          error: e?.message || String(e)
+        })
+        return null
+      }
+    },
+
+    saveSimulationConfigStorage(config) {
+      try {
+        if (!config) return
+        localStorage.setItem('simulation_setup_v1', JSON.stringify(config))
+        this.logEvent('info', 'Configuracion de simulacion guardada en localStorage')
+      } catch (e) {
+        this.logEvent('error', 'Error guardando la configuracion de simulacion', {
+          error: e?.message || String(e)
+        })
+      }
+    },
+
+    clearSimulationConfigStorage() {
+      try {
+        localStorage.removeItem('simulation_setup_v1')
+      } catch (e) {
+        this.logEvent('warn', 'No se pudo limpiar la configuracion de simulacion', {
+          error: e?.message || String(e)
+        })
+      }
+    },
+
+    bootstrapSimulationWindow() {
+      try {
+        const params = this.getQueryParams()
+        const isSimulationRoom = params.get('simulation-room') === '1'
+        const isSimulationPlayer = params.get('sim-player') === '1'
+        if (!isSimulationRoom && !isSimulationPlayer) return
+
+        const config = this.loadSimulationConfigStorage()
+        if (!config) return
+
+        this.adminMode = 'simulacion'
+        this.adminSimulationConfig = config
+
+        if (isSimulationRoom) {
+          this.simulationWindowType = 'room'
+          this.screen = 'simulation-room'
+          this.startGamePolling()
+          this.logEvent('info', 'Ventana de simulacion 4 pantallas inicializada')
+          return
+        }
+
+        const alias = String(params.get('alias') || '').trim().toUpperCase()
+        const isValidAlias = this.simulationPlayersForView.some((player) => player.alias === alias)
+        if (!isValidAlias) return
+
+        this.simulationWindowType = 'player'
+        this.userAlias = alias
+        this.screen = 'webrtc'
+        this.startGamePolling()
+        this.logEvent('info', 'Ventana de jugador simulado inicializada', { alias })
+      } catch (e) {
+        this.logEvent('error', 'Error arrancando una ventana de simulacion', {
+          error: e?.message || String(e)
+        })
+      }
     },
 
     haversineMeters(lat1, lon1, lat2, lon2) {
@@ -235,7 +445,7 @@ export default {
     startGamePolling() {
       this.stopGamePolling()
       this.gamePollTimer = setInterval(async () => {
-        if (this.screen !== 'waiting' && this.screen !== 'webrtc') return
+        if (this.screen !== 'waiting' && this.screen !== 'webrtc' && this.screen !== 'simulation-room') return
         try {
           const res = await fetch('/api/estado-juego')
           if (!res.ok) return
@@ -561,11 +771,35 @@ export default {
     },
 
     handleReset() {
+      if (this.simulationWindowType === 'room') {
+        this.droneInAir = false
+        this.activePlayerAlias = null
+        this.selectedNextPlayerAlias = null
+        this.gotoCompletedAlias = null
+        this.photoTakenAlias = null
+        this.logEvent('info', 'Reset recibido en la ventana de simulacion 4 pantallas')
+        return
+      }
+
+      if (this.simulationWindowType === 'player') {
+        this.droneInAir = false
+        this.activePlayerAlias = null
+        this.selectedNextPlayerAlias = null
+        this.gotoCompletedAlias = null
+        this.photoTakenAlias = null
+        this.logEvent('info', 'Reset recibido en una ventana de jugador simulado', {
+          alias: this.userAlias
+        })
+        return
+      }
+
       this.stopLiveLocation()
       this.stopGamePolling()
       this.live?.disconnect()
       this.screen = 'login'
       this.userAlias = null
+      this.adminMode = 'real'
+      this.adminSimulationConfig = null
       this.droneInAir = false
       this.activePlayerAlias = null
       this.selectedNextPlayerAlias = null
@@ -581,6 +815,7 @@ export default {
       } catch (e) {
         // ignore
       }
+      this.logEvent('info', 'Reset global aplicado en la app')
     }
   }
 }
